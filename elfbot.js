@@ -113,6 +113,12 @@
   };
   const cleanupFns = [];
 
+  // Declarados aqui em cima (não lá embaixo, perto do painel) porque módulos
+  // com enabled:true salvo de sessões anteriores chamam updatePanel() assim
+  // que são definidos — se essas variáveis só existissem mais abaixo no
+  // arquivo, isso geraria "Cannot access before initialization".
+  let panelEl, bodyEl, tabsEl;
+
   // ===== MÓDULO: RUNE MAKER =====
   const Rune = (() => {
     const KEY = "rune.config";
@@ -5315,7 +5321,9 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
   bot.equipRing = Ring;
 
   // ===== PAINEL ÚNICO COM ABAS =====
-  let panelEl, bodyEl, tabsEl;
+  // panelEl, bodyEl, tabsEl declarados no topo do arquivo (evita erro de
+  // "acesso antes da inicialização" quando um módulo já vem com enabled:true
+  // salvo e tenta chamar updatePanel() antes do painel existir de fato)
   const tabs = [
     { id: "rune", label: "Rune" },
     { id: "haste", label: "Haste" },
