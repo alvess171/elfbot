@@ -2606,10 +2606,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function getNearbyCreatures() {
-    const targetNames = bot.attack?.config?.targetNames;
-    const hasTargetFilter = Array.isArray(targetNames) && targetNames.length > 0;
-    if (!hasTargetFilter) return [];
-    return bot.attack?.getNearbyMonsters?.() || [];
+    // Agora pausa pra QUALQUER monstro visível via bot.xray — não depende
+    // mais da lista de "Monstros alvo" configurada na aba Attack.
+    return bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
   }
 
   function hasNearbyCreatures() {
