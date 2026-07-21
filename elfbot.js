@@ -1076,6 +1076,80 @@
     return { config, start, stop, isInCombat, get running() { return state.running; } };
   })();
 
+  // ===== MÓDULO: PZ RETURNER (insiste até chegar no PZ salvo, com limite de tempo) =====
+  const PzReturner = (() => {
+    const state = { running: false, timerId: null, startedAt: 0 };
+    const MAX_DURATION_MS = 60000; // desiste depois de 60s tentando
+    const RETRY_INTERVAL_MS = 1500;
+
+    function normalizePosition(value) {
+      if (!value) return null;
+      const x = Number(value.x), y = Number(value.y), z = Number(value.z);
+      if (![x, y, z].every(Number.isFinite)) return null;
+      return { x: Math.trunc(x), y: Math.trunc(y), z: Math.trunc(z) };
+    }
+
+    function getDistance(from, to) {
+      if (!from || !to || from.z !== to.z) return Infinity;
+      return Math.max(Math.abs(from.x - to.x), Math.abs(from.y - to.y));
+    }
+
+    function hasArrived() {
+      const home = bot.pz?.getHomePz?.();
+      const me = normalizePosition(bot.getPlayerPosition());
+      if (!home || !me) return false;
+      return getDistance(me, home) <= 1;
+    }
+
+    let lastStatus = "parado";
+
+    function tick() {
+      if (!state.running) return;
+
+      try {
+        if (hasArrived()) {
+          lastStatus = "chegou no PZ";
+          stop();
+          return;
+        }
+
+        if (Date.now() - state.startedAt > MAX_DURATION_MS) {
+          lastStatus = "desistiu (tempo esgotado)";
+          stop();
+          return;
+        }
+
+        bot.pz?.goToHomePz?.();
+        lastStatus = "tentando chegar...";
+      } catch (error) {
+        log("pz returner tick failed", error?.message || error);
+      }
+
+      updatePanel();
+      state.timerId = window.setTimeout(tick, RETRY_INTERVAL_MS);
+    }
+
+    function start() {
+      if (state.running) return;
+      if (!bot.pz?.getHomePz?.()) {
+        log("PZ returner: nenhum PZ salvo ainda");
+        return;
+      }
+      state.running = true;
+      state.startedAt = Date.now();
+      lastStatus = "tentando chegar...";
+      tick();
+    }
+
+    function stop() {
+      state.running = false;
+      if (state.timerId != null) { clearTimeout(state.timerId); state.timerId = null; }
+      updatePanel();
+    }
+
+    return { start, stop, get running() { return state.running; }, get status() { return lastStatus; } };
+  })();
+
   // ===== MÓDULO: HAZARD STEPPER (passo manual através de fogo/campos perigosos) =====
   const HazardStepper = (() => {
     const state = { rafId: null, lastPositionKey: null, lastProgressAt: 0, running: false, stepsCount: 0 };
@@ -6088,8 +6162,22 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     clearBtn.onclick = () => { bot.pz.clearHomePz(); renderBody(); };
     wrap.appendChild(clearBtn);
 
-    const goHomeBtn = el("button", "width:100%; padding:6px; margin-bottom:6px; border:none; border-radius:4px; cursor:pointer; background:#2c4fc7; color:#fff; font-weight:bold;", "Ir pro PZ salvo agora");
-    goHomeBtn.onclick = () => { bot.pz.goToHomePz(); };
+    const goHomeStatusEl = el("div", "margin-bottom:4px; font-size:11px; color:#999;");
+    goHomeStatusEl.dataset.pzReturnerStatus = "1";
+    wrap.appendChild(goHomeStatusEl);
+
+    const goHomeBtn = el("button", "width:100%; padding:6px; margin-bottom:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshGoHomeBtn() {
+      goHomeBtn.textContent = PzReturner.running ? "Parar (insistindo até chegar)" : "Ir pro PZ salvo agora (insiste até chegar)";
+      goHomeBtn.style.background = PzReturner.running ? "#a33" : "#2c4fc7";
+    }
+    goHomeBtn.onclick = () => {
+      PzReturner.running ? PzReturner.stop() : PzReturner.start();
+      refreshGoHomeBtn();
+    };
+    refreshGoHomeBtn();
+    goHomeBtn.dataset.refreshable = "1";
+    goHomeBtn._refresh = refreshGoHomeBtn;
     wrap.appendChild(goHomeBtn);
 
     const goNearestBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; background:#333; color:#ccc;", "Ir pro PZ mais próximo (qualquer um)");
@@ -6351,6 +6439,11 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
         : "Nenhum PZ salvo ainda";
       pzHomeInfoEl.style.color = home ? "#9c9" : "#999";
     }
+    const pzReturnerStatusEl = bodyEl.querySelector("[data-pz-returner-status]");
+    if (pzReturnerStatusEl) {
+      pzReturnerStatusEl.textContent = PzReturner.running ? "● " + PzReturner.status : "";
+      pzReturnerStatusEl.style.color = "#fc5";
+    }
 
     // ── UH Player ──
     const uhplayerStatusEl = bodyEl.querySelector("[data-uhplayer-status]");
@@ -6501,7 +6594,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget, Profiles,
     Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
     UhPlayer: bot.uhPlayer, AttackSpellCaster,
-    Chatdetector: bot.Chatdetector, HazardStepper,
+    Chatdetector: bot.Chatdetector, HazardStepper, PzReturner,
   };
   log("carregado. Painel com 22 abas criado no canto da tela.");
 })();
