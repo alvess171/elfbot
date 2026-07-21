@@ -1015,6 +1015,61 @@
     return { config, start, stop, get running() { return state.running; } };
   })();
 
+  // ===== MÓDULO: ATTACK HOTKEY CASTER (aperta hotkey com delay enquanto o Attack está em combate) =====
+  const AttackSpellCaster = (() => {
+    const KEY = "attackHotkeyCaster.config";
+    const state = { running: false, timerId: null, lastCastAt: 0 };
+    const config = Object.assign(
+      { hotbarSlot: 1, delayMs: 2000, enabled: false },
+      bot.storage.get(KEY, {})
+    );
+
+    function persist() { bot.storage.set(KEY, { ...config }); }
+
+    function isInCombat() {
+      try {
+        return !!bot.attack?.isCombatActive?.();
+      } catch {
+        return false;
+      }
+    }
+
+    function normalizeSlot(slot) {
+      const n = Math.trunc(Number(slot));
+      return Number.isFinite(n) && n >= 1 && n <= 12 ? n : null;
+    }
+
+    function tick() {
+      if (!state.running) return;
+      try {
+        const now = Date.now();
+        const slot = normalizeSlot(config.hotbarSlot);
+        if (slot && isInCombat() && now - state.lastCastAt >= Math.max(200, Number(config.delayMs) || 2000)) {
+          if (bot.clickHotbar(slot - 1)) {
+            state.lastCastAt = now;
+            log("attack hotkey pressed, slot:", slot);
+          }
+        }
+      } catch (e) { log("attack hotkey caster tick failed", e?.message); }
+      updatePanel();
+      state.timerId = window.setTimeout(tick, 250);
+    }
+
+    function start() {
+      if (state.running) return;
+      state.running = true; config.enabled = true; persist(); tick();
+    }
+    function stop() {
+      state.running = false; config.enabled = false; persist();
+      if (state.timerId != null) { clearTimeout(state.timerId); state.timerId = null; }
+      updatePanel();
+    }
+
+    if (config.enabled) start();
+
+    return { config, start, stop, isInCombat, get running() { return state.running; } };
+  })();
+
   // ===== MÓDULO: PROFILES (salva/restaura config dos módulos deste painel) =====
   const Profiles = (() => {
     const ALL_MODULES = { Rune, Haste, Eat, Ring, Monk, Stones, Panic, Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget };
@@ -4584,7 +4639,254 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
   bot.goToHomePz = goToHomePz;
 };
 
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installUHPlayerModule = function installUHPlayerModule(bot) {
+  const configStorageKey = "minibiaBot.uhPlayer.config";
+
+  const state = {
+    running: false,
+    timerId: null,
+    lastRuneAt: 0,
+  };
+
+  const config = Object.assign(
+    {
+      targetName: "",
+      maxHpPercent: 70,               // usa a runa de cura quando a vida do alvo estiver <= esse valor
+      runeNamePattern: "ultimate healing rune", // texto/regex pra achar a runa pelo nome
+      runeSid: null,                  // opcional: SID exato da runa (mais preciso que o nome)
+      runeCid: null,                  // opcional: CID exato da runa
+      cooldownMs: 1500,
+      maxDistance: 8,                 // alcance máximo pra considerar o alvo "visível"
+      enabled: false,
+    },
+    bot.storage.get(configStorageKey, {})
+  );
+
+  function persistConfig() {
+    bot.storage.set(configStorageKey, { ...config });
+  }
+
+  function normalizeName(name) {
+    return String(name || "").trim().toLowerCase();
+  }
+
+  function getMyPosition() {
+    return bot.getPlayerPosition();
+  }
+
+  function getDistance(from, to) {
+    if (!from || !to || from.z !== to.z) return Infinity;
+    return Math.max(Math.abs(from.x - to.x), Math.abs(from.y - to.y));
+  }
+
+  function findTargetPlayer() {
+    const targetName = normalizeName(config.targetName);
+    if (!targetName) return null;
+
+    const myId = window.gameClient?.player?.id;
+    const creature = Object.values(window.gameClient?.world?.activeCreatures || {}).find((c) => {
+      return c && c.id !== myId && c.type === 0 && normalizeName(c.name) === targetName;
+    });
+
+    if (!creature) return null;
+
+    const me = getMyPosition();
+    const pos = creature.__position;
+    if (me && pos && getDistance(me, pos) > Math.max(1, Number(config.maxDistance) || 8)) {
+      return null; // achou, mas está fora do alcance configurado
+    }
+
+    return creature;
+  }
+
+  function readHpPercent(creature) {
+    if (!creature) return null;
+    const hp = Number(creature.health ?? creature.hp ?? creature.state?.health);
+    const max = Number(creature.maxHealth ?? creature.maxHp ?? creature.state?.maxHealth);
+    if (Number.isFinite(hp) && Number.isFinite(max) && max > 0) return (hp / max) * 100;
+    const pct = Number(creature.healthPercent ?? creature.hpPercent ?? creature.state?.healthPercent);
+    return Number.isFinite(pct) ? pct : null;
+  }
+
+  // ── Encontrar a runa de cura dentro da backpack ─────────────
+  function getOpenContainers() {
+    return Array.from(window.gameClient?.player?.__openedContainers || []);
+  }
+
+  function getItemDefinition(item) {
+    if (!item) return null;
+    return (
+      window.gameClient?.itemDefinitionsByCid?.[item.cid ?? item.id] ||
+      window.gameClient?.itemDefinitionsBySid?.[item.sid] ||
+      window.gameClient?.itemDefinitions?.[item.id] ||
+      null
+    );
+  }
+
+  function getItemName(item) {
+    return String(getItemDefinition(item)?.properties?.name || item?.name || "");
+  }
+
+  function isHealRuneItem(item) {
+    if (!item) return false;
+
+    if (config.runeSid != null && item.sid === config.runeSid) return true;
+    if (config.runeCid != null && item.cid === config.runeCid) return true;
+    if (config.runeSid != null || config.runeCid != null) return false; // se configurou SID/CID, não cai pro nome
+
+    const pattern = config.runeNamePattern || "ultimate healing rune";
+    try {
+      const regex = new RegExp(pattern, "i");
+      return regex.test(getItemName(item));
+    } catch {
+      return getItemName(item).toLowerCase().includes(pattern.toLowerCase());
+    }
+  }
+
+  function findHealRuneSource() {
+    let best = null;
+    let bestCount = -1;
+
+    const consider = (container, slotIndex, item) => {
+      if (!isHealRuneItem(item)) return;
+      const count = (typeof item.getCount === "function" ? item.getCount() : item.count) || 1;
+      if (count > bestCount) {
+        bestCount = count;
+        best = { container, slotIndex, item, count, name: getItemName(item) };
+      }
+    };
+
+    getOpenContainers().forEach((container) => {
+      (container?.slots || []).forEach((slot, slotIndex) => {
+        consider(container, slotIndex, container.getSlotItem?.(slotIndex));
+      });
+    });
+
+    return best;
+  }
+
+  // ── Usar a runa de cura direto no jogador ────────────────────
+  function useHealRuneOnCreature(source, creature) {
+    try {
+      window.gameClient?.mouse?.__handleItemUseWith?.(
+        { which: source.container, index: source.slotIndex },
+        { which: creature, index: 0xFF }
+      );
+      state.lastRuneAt = Date.now();
+      bot.log("UH Player: runa de cura usada", { target: creature.name, rune: source.name });
+      return true;
+    } catch (error) {
+      bot.log("UH Player: erro ao usar runa de cura", error?.message || error);
+      return false;
+    }
+  }
+
+  function tryHeal() {
+    if (!config.enabled) return false;
+
+    const now = Date.now();
+    const creature = findTargetPlayer();
+    if (!creature) return false;
+
+    const hpPercent = readHpPercent(creature);
+    if (hpPercent == null || hpPercent > Math.max(0, Math.min(100, Number(config.maxHpPercent) || 70))) {
+      return false;
+    }
+
+    if (now - state.lastRuneAt < Math.max(0, Number(config.cooldownMs) || 1500)) {
+      return false;
+    }
+
+    const source = findHealRuneSource();
+    if (!source) {
+      return false; // sem runa de cura na bag no momento
+    }
+
+    return useHealRuneOnCreature(source, creature);
+  }
+
+  function tick() {
+    if (!state.running) return;
+    try {
+      tryHeal();
+    } catch (error) {
+      bot.log("UH Player tick error", error?.message || error);
+    } finally {
+      state.timerId = window.setTimeout(tick, 200);
+    }
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    persistConfig();
+    if (state.running) {
+      bot.log("UH Player already running");
+      return false;
+    }
+    state.running = true;
+    bot.log("UH Player started", { ...config });
+    tick();
+    return true;
+  }
+
+  function stop(options = {}) {
+    const shouldPersistEnabled = options.persistEnabled !== false;
+    state.running = false;
+    if (state.timerId != null) {
+      window.clearTimeout(state.timerId);
+      state.timerId = null;
+    }
+    if (shouldPersistEnabled) {
+      config.enabled = false;
+      persistConfig();
+    }
+    bot.log("UH Player stopped");
+    return true;
+  }
+
+  function status() {
+    const creature = findTargetPlayer();
+    const source = findHealRuneSource();
+    return {
+      running: state.running,
+      config: { ...config },
+      targetFound: !!creature,
+      targetHpPercent: readHpPercent(creature),
+      runeAvailable: !!source,
+      runeName: source?.name || null,
+      lastRuneAt: state.lastRuneAt,
+    };
+  }
+
+  function updateConfig(next = {}) {
+    if ("targetName" in next) next.targetName = String(next.targetName || "").trim();
+    if ("maxHpPercent" in next) next.maxHpPercent = Math.min(100, Math.max(0, Number(next.maxHpPercent) || 70));
+    if ("runeNamePattern" in next) next.runeNamePattern = String(next.runeNamePattern || "ultimate healing rune").trim() || "ultimate healing rune";
+    if ("runeSid" in next) next.runeSid = next.runeSid === "" || next.runeSid == null ? null : Number(next.runeSid);
+    if ("runeCid" in next) next.runeCid = next.runeCid === "" || next.runeCid == null ? null : Number(next.runeCid);
+    if ("cooldownMs" in next) next.cooldownMs = Math.max(0, Number(next.cooldownMs) || 1500);
+    if ("maxDistance" in next) next.maxDistance = Math.max(1, Number(next.maxDistance) || 8);
+    Object.assign(config, next);
+    persistConfig();
+    bot.log("UH Player config updated", { ...config });
+    return { ...config };
+  }
+
+  if (config.enabled && config.targetName) start();
+
+  bot.addCleanup?.(() => stop({ persistEnabled: false }));
+
+  bot.uhPlayer = {
+    start, stop, status, updateConfig, tryHeal, findTargetPlayer, findHealRuneSource, config,
+  };
+};
+
   window.__minibiaBotBundle.installPzModule(bot);
+  window.__minibiaBotBundle.installUHPlayerModule(bot);
   window.__minibiaBotBundle.installAutoAttackModule(bot);
   window.__minibiaBotBundle.installCaveModule(bot);
   window.__minibiaBotBundle.installPanicModule(bot);
@@ -4614,6 +4916,7 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
     { id: "friendheal", label: "FrHeal" },
     { id: "lasttarget", label: "LastTgt" },
     { id: "attack", label: "Attack" },
+    { id: "uhplayer", label: "UH Player" },
     { id: "cave", label: "Cave" },
     { id: "gmpanic", label: "GM Panic" },
     { id: "drop", label: "Drop" },
@@ -4962,6 +5265,23 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
     }
     renderNamesList();
 
+    // ── Hotkey enquanto ataca (com delay configurável) ─────────
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:10px 0 4px; border-top:1px solid #333; padding-top:8px;", "Apertar hotkey enquanto estiver atacando:"));
+
+    const spellToggleRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer; color:#ccc;");
+    const spellToggleCheckbox = el("input");
+    spellToggleCheckbox.type = "checkbox";
+    spellToggleCheckbox.checked = !!AttackSpellCaster.running;
+    spellToggleCheckbox.onchange = () => {
+      spellToggleCheckbox.checked ? AttackSpellCaster.start() : AttackSpellCaster.stop();
+    };
+    spellToggleRow.appendChild(spellToggleCheckbox);
+    spellToggleRow.appendChild(document.createTextNode("Ativar"));
+    wrap.appendChild(spellToggleRow);
+
+    wrap.appendChild(makeField("Slot da hotkey de ataque", AttackSpellCaster.config.hotbarSlot, (v) => { AttackSpellCaster.config.hotbarSlot = Math.min(12, Math.max(1, Number(v) || 1)); }, "number"));
+    wrap.appendChild(makeField("Delay entre usos (ms)", AttackSpellCaster.config.delayMs, (v) => { AttackSpellCaster.config.delayMs = Math.max(200, Number(v) || 2000); }, "number"));
+
     const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff; margin-top:6px;");
     function refreshToggle() {
       const running = bot.attack.status().running;
@@ -4981,6 +5301,39 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
   }
 
   // ===== ABA: CAVE (waypoints, presets, hotkey) =====
+  // ===== ABA: ATK RUNE (usa runa da backpack num jogador específico por %) =====
+  function buildUhPlayerTab() {
+    const wrap = el("div");
+
+    const statusEl = el("div", "margin-bottom:8px; font-size:11px;");
+    statusEl.dataset.uhplayerStatus = "1";
+    wrap.appendChild(statusEl);
+
+    wrap.appendChild(makeField("Nome do jogador alvo", bot.uhPlayer.config.targetName, (v) => { bot.uhPlayer.updateConfig({ targetName: v.trim() }); }));
+    wrap.appendChild(makeField("Curar se vida <= (%)", bot.uhPlayer.config.maxHpPercent, (v) => { bot.uhPlayer.updateConfig({ maxHpPercent: Number(v) || 70 }); }, "number"));
+    wrap.appendChild(makeField("Nome da runa de cura (regex/texto)", bot.uhPlayer.config.runeNamePattern, (v) => { bot.uhPlayer.updateConfig({ runeNamePattern: v.trim() || "ultimate healing rune" }); }));
+    wrap.appendChild(makeField("SID da runa (opcional, mais preciso)", bot.uhPlayer.config.runeSid ?? "", (v) => { bot.uhPlayer.updateConfig({ runeSid: v.trim() === "" ? null : Number(v) }); }, "number"));
+    wrap.appendChild(makeField("Cooldown (ms)", bot.uhPlayer.config.cooldownMs, (v) => { bot.uhPlayer.updateConfig({ cooldownMs: Number(v) || 1500 }); }, "number"));
+    wrap.appendChild(makeField("Alcance máximo (tiles)", bot.uhPlayer.config.maxDistance, (v) => { bot.uhPlayer.updateConfig({ maxDistance: Number(v) || 8 }); }, "number"));
+
+    const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshToggle() {
+      const running = bot.uhPlayer.status().running;
+      toggleBtn.textContent = running ? "Stop UH Player" : "Start UH Player";
+      toggleBtn.style.background = running ? "#a33" : "#2d7a2d";
+    }
+    toggleBtn.onclick = () => {
+      bot.uhPlayer.status().running ? bot.uhPlayer.stop() : bot.uhPlayer.start();
+      refreshToggle();
+    };
+    refreshToggle();
+    toggleBtn.dataset.refreshable = "1";
+    toggleBtn._refresh = refreshToggle;
+    wrap.appendChild(toggleBtn);
+
+    return wrap;
+  }
+
   function buildCaveTab() {
     const wrap = el("div");
     const s = bot.cave.status();
@@ -5326,7 +5679,7 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
     monk: buildMonkTab, stones: buildStonesTab, panic: buildPanicTab, heal: buildHealTab,
     invisible: buildInvisibleTab, magicshield: buildMagicShieldTab, follow: buildFollowTab,
     friendheal: buildFriendHealTab, lasttarget: buildLastTargetTab, profiles: buildProfilesTab,
-    attack: buildAttackTab, cave: buildCaveTab, gmpanic: buildGmPanicTab, drop: buildDropTab,
+    attack: buildAttackTab, uhplayer: buildUhPlayerTab, cave: buildCaveTab, gmpanic: buildGmPanicTab, drop: buildDropTab,
     pz: buildPzTab,
   };
 
@@ -5420,6 +5773,22 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
         ? "PZ salvo: (" + home.x + ", " + home.y + ", " + home.z + ")"
         : "Nenhum PZ salvo ainda";
       pzHomeInfoEl.style.color = home ? "#9c9" : "#999";
+    }
+
+    // ── UH Player ──
+    const uhplayerStatusEl = bodyEl.querySelector("[data-uhplayer-status]");
+    if (uhplayerStatusEl && bot.uhPlayer) {
+      const s = bot.uhPlayer.status();
+      if (!s.config.targetName) {
+        uhplayerStatusEl.textContent = "Configure o nome do jogador alvo";
+        uhplayerStatusEl.style.color = "#999";
+      } else if (!s.targetFound) {
+        uhplayerStatusEl.textContent = "○ Alvo fora de vista: " + s.config.targetName;
+        uhplayerStatusEl.style.color = "#999";
+      } else {
+        uhplayerStatusEl.textContent = "● " + s.config.targetName + " — vida: " + (s.targetHpPercent != null ? s.targetHpPercent.toFixed(0) + "%" : "?") + (s.runeAvailable ? "" : " (sem runa de cura na bag)");
+        uhplayerStatusEl.style.color = s.runeAvailable ? "#5c5" : "#e77";
+      }
     }
   }
 
@@ -5537,6 +5906,7 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
     Rune, Haste, Eat, Ring, Monk, Stones, Panic,
     Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget, Profiles,
     Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
+    UhPlayer: bot.uhPlayer, AttackSpellCaster,
   };
-  log("carregado. Painel com 19 abas criado no canto da tela.");
+  log("carregado. Painel com 20 abas criado no canto da tela.");
 })();
