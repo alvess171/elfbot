@@ -24,6 +24,10 @@
         localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value));
         return value;
       },
+      remove(key) {
+        if (externalBot?.storage?.remove) return externalBot.storage.remove(key);
+        localStorage.removeItem(STORAGE_PREFIX + key);
+      },
     },
     sendChat(text) {
       if (externalBot?.sendChat) return externalBot.sendChat(text);
@@ -4384,6 +4388,203 @@ window.__minibiaBotBundle.installDropModule = function installDropModule(bot) {
 
 
   // Roda de fato as instalações, populando bot.attack, bot.cave, bot.panic, bot.drop
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
+  const homeStorageKey = "minibiaBot.pz.home";
+
+  function getLoadedTiles() {
+    const chunks = window.gameClient?.world?.chunks || [];
+    const tiles = [];
+
+    for (const chunk of chunks) {
+      if (!chunk?.tiles) continue;
+
+      for (const tile of chunk.tiles) {
+        if (tile?.__position) {
+          tiles.push(tile);
+        }
+      }
+    }
+
+    return tiles;
+  }
+
+  function hasPzFlag(tile) {
+    return !!tile && ((tile.flags || 0) & 1) !== 0;
+  }
+
+  function getPzCandidates() {
+    const me = bot.getPlayerPosition();
+    if (!me) return [];
+
+    return getLoadedTiles()
+      .filter((tile) => hasPzFlag(tile) && tile.__position?.z === me.z)
+      .map((tile) => {
+        const p = tile.__position;
+        return {
+          tile,
+          x: p.x,
+          y: p.y,
+          z: p.z,
+          flags: tile.flags || 0,
+          dist: Math.abs(p.x - me.x) + Math.abs(p.y - me.y),
+        };
+      })
+      .sort((a, b) => a.dist - b.dist);
+  }
+
+  function goToTile(tile) {
+    if (!tile?.__position) return false;
+
+    const from = bot.getPlayerPosition();
+    if (!from) return false;
+
+    const p = tile.__position;
+    const to = new Position(p.x, p.y, p.z);
+
+    try {
+      window.gameClient?.world?.pathfinder?.findPath?.(from, to);
+      bot.log("pathing to", { x: p.x, y: p.y, z: p.z, flags: tile.flags });
+      return true;
+    } catch (error) {
+      bot.log("pathing failed", { x: p.x, y: p.y, z: p.z, error: error?.message });
+      return false;
+    }
+  }
+
+  function goToNearestPz(maxAttempts = 20) {
+    const candidates = getPzCandidates().slice(0, maxAttempts);
+
+    if (!candidates.length) {
+      bot.log("No PZ candidates found");
+      return false;
+    }
+
+    for (const candidate of candidates) {
+      if (goToTile(candidate.tile)) {
+        bot.log("selected PZ", {
+          x: candidate.x,
+          y: candidate.y,
+          z: candidate.z,
+          flags: candidate.flags,
+          dist: candidate.dist,
+        });
+        return true;
+      }
+    }
+
+    bot.log("No PZ candidate accepted by pathfinder");
+    return false;
+  }
+
+  function setHomePz(x, y, z) {
+    const home = { x, y, z };
+    bot.storage.set(homeStorageKey, home);
+    bot.log("home PZ set", home);
+    return home;
+  }
+
+  function setHomePzCurrentSpot() {
+    const pos = bot.getPlayerPosition();
+    if (!pos) {
+      bot.log("Could not read current position");
+      return null;
+    }
+
+    return setHomePz(pos.x, pos.y, pos.z);
+  }
+
+  function getHomePz() {
+    return bot.storage.get(homeStorageKey, null);
+  }
+
+  function clearHomePz() {
+    bot.storage.remove(homeStorageKey);
+    bot.log("home PZ cleared");
+  }
+
+  function getNearestPzTo(x, y, z) {
+    const candidates = getLoadedTiles()
+      .filter((tile) => hasPzFlag(tile) && tile.__position?.z === z)
+      .map((tile) => {
+        const p = tile.__position;
+        return {
+          tile,
+          x: p.x,
+          y: p.y,
+          z: p.z,
+          flags: tile.flags || 0,
+          dist: Math.abs(p.x - x) + Math.abs(p.y - y),
+        };
+      })
+      .sort((a, b) => a.dist - b.dist);
+
+    return candidates[0] || null;
+  }
+
+  function goToHomePz() {
+    const home = getHomePz();
+    if (!home) {
+      bot.log("No home PZ set");
+      return false;
+    }
+
+    const candidate = getNearestPzTo(home.x, home.y, home.z);
+    if (!candidate) {
+      bot.log("No loaded PZ found near saved home", home);
+      return false;
+    }
+
+    bot.log("home candidate", {
+      x: candidate.x,
+      y: candidate.y,
+      z: candidate.z,
+      flags: candidate.flags,
+      distFromHome: candidate.dist,
+    });
+
+    return goToTile(candidate.tile);
+  }
+
+  function printPzCandidates(limit = 10) {
+    const rows = getPzCandidates()
+      .slice(0, limit)
+      .map((candidate) => ({
+        x: candidate.x,
+        y: candidate.y,
+        z: candidate.z,
+        flags: candidate.flags,
+        dist: candidate.dist,
+      }));
+
+    console.table(rows);
+    return rows;
+  }
+
+  bot.pz = {
+    getLoadedTiles,
+    getPzCandidates,
+    goToTile,
+    goToNearestPz,
+    setHomePz,
+    setHomePzCurrentSpot,
+    getHomePz,
+    clearHomePz,
+    getNearestPzTo,
+    goToHomePz,
+    printPzCandidates,
+  };
+
+  bot.goToNearestPz = goToNearestPz;
+  bot.setHomePz = setHomePz;
+  bot.setHomePzCurrentSpot = setHomePzCurrentSpot;
+  bot.getHomePz = getHomePz;
+  bot.clearHomePz = clearHomePz;
+  bot.goToHomePz = goToHomePz;
+};
+
+  window.__minibiaBotBundle.installPzModule(bot);
   window.__minibiaBotBundle.installAutoAttackModule(bot);
   window.__minibiaBotBundle.installCaveModule(bot);
   window.__minibiaBotBundle.installPanicModule(bot);
@@ -4416,6 +4617,7 @@ window.__minibiaBotBundle.installDropModule = function installDropModule(bot) {
     { id: "cave", label: "Cave" },
     { id: "gmpanic", label: "GM Panic" },
     { id: "drop", label: "Drop" },
+    { id: "pz", label: "PZ" },
     { id: "profiles", label: "Profiles" },
   ];
   let activeTab = "rune";
@@ -5090,12 +5292,42 @@ window.__minibiaBotBundle.installDropModule = function installDropModule(bot) {
     return wrap;
   }
 
+  // ===== ABA: PZ (define local seguro de origem, usado pelo GM Panic) =====
+  function buildPzTab() {
+    const wrap = el("div");
+
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:8px;", "Define um local seguro (PZ) — o GM Panic manda o personagem pra cá quando dispara o alarme."));
+
+    const homeInfoEl = el("div", "margin-bottom:8px; font-size:11px; color:#9c9;");
+    homeInfoEl.dataset.pzHomeInfo = "1";
+    wrap.appendChild(homeInfoEl);
+
+    const setBtn = el("button", "width:100%; padding:6px; margin-bottom:6px; border:none; border-radius:4px; cursor:pointer; background:#2d7a2d; color:#fff; font-weight:bold;", "Definir PZ na minha posição atual");
+    setBtn.onclick = () => { bot.pz.setHomePzCurrentSpot(); renderBody(); };
+    wrap.appendChild(setBtn);
+
+    const clearBtn = el("button", "width:100%; padding:6px; margin-bottom:8px; border:none; border-radius:4px; cursor:pointer; background:#555; color:#fff;", "Limpar PZ salvo");
+    clearBtn.onclick = () => { bot.pz.clearHomePz(); renderBody(); };
+    wrap.appendChild(clearBtn);
+
+    const goHomeBtn = el("button", "width:100%; padding:6px; margin-bottom:6px; border:none; border-radius:4px; cursor:pointer; background:#2c4fc7; color:#fff; font-weight:bold;", "Ir pro PZ salvo agora");
+    goHomeBtn.onclick = () => { bot.pz.goToHomePz(); };
+    wrap.appendChild(goHomeBtn);
+
+    const goNearestBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; background:#333; color:#ccc;", "Ir pro PZ mais próximo (qualquer um)");
+    goNearestBtn.onclick = () => { bot.pz.goToNearestPz(); };
+    wrap.appendChild(goNearestBtn);
+
+    return wrap;
+  }
+
   const tabBuilders = {
     rune: buildRuneTab, haste: buildHasteTab, eat: buildEatTab, ring: buildRingTab,
     monk: buildMonkTab, stones: buildStonesTab, panic: buildPanicTab, heal: buildHealTab,
     invisible: buildInvisibleTab, magicshield: buildMagicShieldTab, follow: buildFollowTab,
     friendheal: buildFriendHealTab, lasttarget: buildLastTargetTab, profiles: buildProfilesTab,
     attack: buildAttackTab, cave: buildCaveTab, gmpanic: buildGmPanicTab, drop: buildDropTab,
+    pz: buildPzTab,
   };
 
   function renderBody() {
@@ -5178,6 +5410,16 @@ window.__minibiaBotBundle.installDropModule = function installDropModule(bot) {
       dropPosInfoEl.textContent = s.config.fixedPosition
         ? "Posição fixa: (" + s.config.fixedPosition.x + ", " + s.config.fixedPosition.y + ", " + s.config.fixedPosition.z + ")"
         : "Posição: onde eu estiver";
+    }
+
+    // ── PZ ──
+    const pzHomeInfoEl = bodyEl.querySelector("[data-pz-home-info]");
+    if (pzHomeInfoEl && bot.pz) {
+      const home = bot.pz.getHomePz();
+      pzHomeInfoEl.textContent = home
+        ? "PZ salvo: (" + home.x + ", " + home.y + ", " + home.z + ")"
+        : "Nenhum PZ salvo ainda";
+      pzHomeInfoEl.style.color = home ? "#9c9" : "#999";
     }
   }
 
@@ -5294,7 +5536,7 @@ window.__minibiaBotBundle.installDropModule = function installDropModule(bot) {
   window.allInOne = {
     Rune, Haste, Eat, Ring, Monk, Stones, Panic,
     Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget, Profiles,
-    Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop,
+    Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
   };
-  log("carregado. Painel com 18 abas criado no canto da tela.");
+  log("carregado. Painel com 19 abas criado no canto da tela.");
 })();
