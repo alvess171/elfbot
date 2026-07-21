@@ -1070,6 +1070,150 @@
     return { config, start, stop, isInCombat, get running() { return state.running; } };
   })();
 
+  // ===== MÓDULO: HAZARD STEPPER (passo manual através de fogo/campos perigosos) =====
+  const HazardStepper = (() => {
+    const state = { rafId: null, lastPositionKey: null, lastProgressAt: 0, running: false, stepsCount: 0 };
+    const STUCK_THRESHOLD_MS = 300;
+
+    function normalizePosition(value) {
+      if (!value) return null;
+      const x = Number(value.x), y = Number(value.y), z = Number(value.z);
+      if (![x, y, z].every(Number.isFinite)) return null;
+      return { x: Math.trunc(x), y: Math.trunc(y), z: Math.trunc(z) };
+    }
+    function getPositionKey(pos) { return pos ? `${pos.x},${pos.y},${pos.z}` : null; }
+    function getMyPosition() { return normalizePosition(bot.getPlayerPosition()); }
+
+    function getDirectionToward(from, to) {
+      const D = window.CONST?.DIRECTION;
+      if (!D || !from || !to) return null;
+      const dx = to.x - from.x, dy = to.y - from.y;
+      if (dx === 0 && dy < 0) return D.NORTH;
+      if (dx === 0 && dy > 0) return D.SOUTH;
+      if (dy === 0 && dx < 0) return D.WEST;
+      if (dy === 0 && dx > 0) return D.EAST;
+      if (dx > 0 && dy < 0) return D.NORTHEAST;
+      if (dx < 0 && dy < 0) return D.NORTHWEST;
+      if (dx > 0 && dy > 0) return D.SOUTHEAST;
+      if (dx < 0 && dy > 0) return D.SOUTHWEST;
+      return null;
+    }
+
+    const DIRECTION_OFFSETS = () => {
+      const D = window.CONST?.DIRECTION;
+      if (!D) return {};
+      return {
+        [D.NORTH]: { x: 0, y: -1 }, [D.SOUTH]: { x: 0, y: 1 },
+        [D.WEST]: { x: -1, y: 0 }, [D.EAST]: { x: 1, y: 0 },
+        [D.NORTHEAST]: { x: 1, y: -1 }, [D.NORTHWEST]: { x: -1, y: -1 },
+        [D.SOUTHEAST]: { x: 1, y: 1 }, [D.SOUTHWEST]: { x: -1, y: 1 },
+      };
+    };
+
+    // Prioriza o waypoint atual do cave bot (já disponível como bot.cave nesse painel)
+    function getGuideDestination() {
+      const caveWaypoint = bot?.cave?.getCurrentWaypoint?.();
+      if (caveWaypoint && caveWaypoint.type !== "delay") {
+        const pos = normalizePosition(caveWaypoint);
+        if (pos) return pos;
+      }
+      return normalizePosition(window.gameClient?.world?.pathfinder?.__finalDestination);
+    }
+
+    function getTileAt(pos) {
+      if (!pos || typeof Position !== "function") return null;
+      try {
+        return window.gameClient?.world?.getTileFromWorldPosition?.(new Position(pos.x, pos.y, pos.z)) || null;
+      } catch { return null; }
+    }
+
+    function isNextTileHazardBlocked(from, direction) {
+      const offsets = DIRECTION_OFFSETS();
+      const offset = offsets[direction];
+      if (!offset) return false;
+      const nextPos = { x: from.x + offset.x, y: from.y + offset.y, z: from.z };
+      const tile = getTileAt(nextPos);
+      if (!tile) return false;
+      try { return !!tile.isNotPathable?.(); } catch { return false; }
+    }
+
+    function tryManualStep(destination) {
+      const from = getMyPosition();
+      if (!from || !destination || from.z !== destination.z) return false;
+      const direction = getDirectionToward(from, destination);
+      if (direction == null) return false;
+      if (!isNextTileHazardBlocked(from, direction)) return false;
+      try {
+        window.gameClient.keyboard.handleMoveKey.call(window.gameClient.keyboard, direction);
+        state.stepsCount++;
+        log("hazard stepper: passo manual através de campo perigoso", { from, destination, direction });
+        return true;
+      } catch (error) {
+        log("hazard stepper: passo manual falhou", error?.message || error);
+        return false;
+      }
+    }
+
+    let lastStatus = "parado";
+
+    function frame() {
+      if (!state.running) { state.rafId = null; return; }
+      try {
+        const position = getMyPosition();
+        const positionKey = getPositionKey(position);
+        const now = Date.now();
+
+        if (positionKey && positionKey !== state.lastPositionKey) {
+          state.lastPositionKey = positionKey;
+          state.lastProgressAt = now;
+        }
+
+        const destination = getGuideDestination();
+
+        if (!destination) {
+          lastStatus = "sem waypoint/destino ativo";
+        } else if (positionKey === getPositionKey(destination)) {
+          lastStatus = "no waypoint";
+        } else {
+          const stuckForMs = state.lastProgressAt ? now - state.lastProgressAt : 0;
+          if (stuckForMs >= STUCK_THRESHOLD_MS) {
+            const direction = getDirectionToward(position, destination);
+            const isHazard = direction != null && isNextTileHazardBlocked(position, direction);
+            if (isHazard) {
+              const stepped = tryManualStep(destination);
+              state.lastProgressAt = now;
+              lastStatus = stepped ? "passo através de campo perigoso" : "campo perigoso, passo falhou";
+            } else {
+              lastStatus = "preso (sem campo perigoso, ignorando)";
+            }
+          } else {
+            lastStatus = "indo normal";
+          }
+        }
+      } catch (error) {
+        log("hazard stepper frame failed", error?.message || error);
+      }
+      updatePanel();
+      state.rafId = requestAnimationFrame(frame);
+    }
+
+    function start() {
+      if (state.running) return;
+      state.running = true;
+      state.lastPositionKey = getPositionKey(getMyPosition());
+      state.lastProgressAt = Date.now();
+      frame();
+    }
+    function stop() {
+      state.running = false;
+      if (state.rafId != null) { cancelAnimationFrame(state.rafId); state.rafId = null; }
+      lastStatus = "parado";
+      updatePanel();
+    }
+
+    return { start, stop, get running() { return state.running; }, get stepsCount() { return state.stepsCount; }, get status() { return lastStatus; } };
+  })();
+
   // ===== MÓDULO: PROFILES (salva/restaura config dos módulos deste painel) =====
   const Profiles = (() => {
     const ALL_MODULES = { Rune, Haste, Eat, Ring, Monk, Stones, Panic, Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget };
@@ -4886,7 +5030,279 @@ window.__minibiaBotBundle.installUHPlayerModule = function installUHPlayerModule
 };
 
   window.__minibiaBotBundle.installPzModule(bot);
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installChatdetectorModule = function installChatdetectorModule(bot) {
+  const configStorageKey = "minibiaBot.chatDetector.config";
+
+  const defaultConfig = {
+    enabled: false,
+    alarmarQualquer: true,   // toca alarme em qualquer mensagem de outra pessoa
+    alarmarMencao: false,    // toca alarme quando te mencionam
+    alarmarVigiados: false,  // toca alarme quando bate um termo vigiado
+    volume: 0.3,
+    tomHz: 880,
+    qtdBips: 3,
+    canaisPermitidos: ["Default", "Console"],
+    ignorarSeContiver: ["hitpoints", "attack"],
+    termosVigiados: [],
+    pollIntervalMs: 500,
+  };
+
+  const config = Object.assign({}, defaultConfig, bot.storage.get(configStorageKey, {}));
+
+  function persistConfig() {
+    bot.storage.set(configStorageKey, { ...config });
+  }
+
+  const state = {
+    running: false,
+    timerId: null,
+    playerName: null,
+    ultimaContagemPorCanal: new Map(),
+  };
+
+  function tocarAlarme() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+
+      for (let i = 0; i < config.qtdBips; i++) {
+        const oscillator = ctx.createOscillator();
+        const gain = ctx.createGain();
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+
+        oscillator.type = "square";
+        oscillator.frequency.value = config.tomHz;
+        gain.gain.value = config.volume;
+
+        const inicio = ctx.currentTime + i * 0.3;
+        oscillator.start(inicio);
+        oscillator.stop(inicio + 0.2);
+      }
+    } catch (erro) {
+      bot.log("chatDetector alarm error: " + erro?.message);
+    }
+  }
+
+  function deveIgnorar(mensagem, remetente) {
+    const texto = (mensagem || "").toLowerCase();
+    const nome = (remetente || "").toLowerCase();
+    return (config.ignorarSeContiver || []).some((padrao) => {
+      const p = padrao.toLowerCase();
+      return texto.includes(p) || nome === p;
+    });
+  }
+
+  function ocultarMensagemNoDOM(remetente, mensagem) {
+    try {
+      const spans = document.querySelectorAll(".chat-message");
+      for (const span of spans) {
+        if (span.style.display === "none") continue;
+        const spanMsg = span.getAttribute("data-message") || "";
+        const spanName = (span.getAttribute("name") || "").trim();
+        if (spanMsg === mensagem && spanName === remetente) {
+          span.style.display = "none";
+          break;
+        }
+      }
+    } catch (erro) {
+      bot.log("chatDetector erro ao esconder mensagem: " + erro?.message);
+    }
+  }
+
+  function processarMensagem(msgObj, nomeCanal, ehHistorico) {
+    const remetente = (msgObj.name || "Sistema").trim();
+    const mensagem = msgObj.message || "";
+
+    const souEuPreCheck = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
+    const bateuVigiadoPreCheck = !souEuPreCheck && (config.termosVigiados || []).some((termo) =>
+      mensagem.toLowerCase().includes(termo.toLowerCase())
+    );
+
+    // Termos vigiados têm prioridade sobre a lista de ignorados — se a
+    // mensagem bater com um termo vigiado, ela nunca é bloqueada pelo
+    // filtro de ignorados (ex: "human" deve passar mesmo numa mensagem
+    // de combate que também contenha "attack").
+    if (!bateuVigiadoPreCheck && deveIgnorar(mensagem, remetente)) {
+      ocultarMensagemNoDOM(remetente, mensagem);
+      return;
+    }
+
+    const souEu = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
+    const fuiMencionado = state.playerName && !souEu && mensagem.toLowerCase().includes(state.playerName.toLowerCase());
+    const bateuVigiado = !souEu && (config.termosVigiados || []).some((termo) =>
+      mensagem.toLowerCase().includes(termo.toLowerCase())
+    );
+
+    const deveAlarmar =
+      !ehHistorico && (
+        (config.alarmarQualquer && !souEu) ||
+        (config.alarmarMencao && fuiMencionado) ||
+        (config.alarmarVigiados && bateuVigiado)
+      );
+
+    const prefixo = "[" + nomeCanal + "]";
+
+    if (bateuVigiado) {
+      console.log(
+        "%c" + prefixo + " [VIGIADO] " + remetente + ": " + mensagem,
+        "color: #ff5555; font-weight: bold;"
+      );
+    } else if (fuiMencionado) {
+      console.log(
+        "%c" + prefixo + " [MENÇÃO] " + remetente + ": " + mensagem,
+        "color: orange; font-weight: bold;"
+      );
+    } else {
+      console.log(prefixo + " [" + remetente + "] " + mensagem);
+    }
+
+    if (deveAlarmar) {
+      tocarAlarme();
+    }
+  }
+
+  function verificarCanais(ehVerificacaoInicial) {
+    const channelManager = window.gameClient?.interface?.channelManager;
+    if (!channelManager || !Array.isArray(channelManager.channels)) {
+      return;
+    }
+
+    channelManager.channels.forEach((channel, indice) => {
+      const nomeCanal = channel.name || ("Canal " + indice);
+
+      if (config.canaisPermitidos.length > 0 && !config.canaisPermitidos.includes(nomeCanal)) {
+        return;
+      }
+
+      const contents = channel.__contents || [];
+      const contagemAnterior = state.ultimaContagemPorCanal.get(indice) || 0;
+
+      if (contents.length > contagemAnterior) {
+        for (let i = contagemAnterior; i < contents.length; i++) {
+          processarMensagem(contents[i], nomeCanal, ehVerificacaoInicial);
+        }
+      }
+
+      state.ultimaContagemPorCanal.set(indice, contents.length);
+    });
+  }
+
+  function start() {
+    config.enabled = true;
+    persistConfig();
+
+    if (state.running) {
+      bot.log("chat detector already running");
+      return false;
+    }
+
+    if (!window.gameClient) {
+      bot.log("chat detector cannot start: gameClient not ready");
+      return false;
+    }
+
+    state.playerName = (window.gameClient?.player?.name || "").trim() || null;
+    state.ultimaContagemPorCanal.clear();
+
+    // Primeira passada: marca tudo que já existe como "histórico"
+    // (não dispara alarme), só estabelece o ponto de partida.
+    verificarCanais(true);
+
+    state.timerId = window.setInterval(() => verificarCanais(false), config.pollIntervalMs);
+    state.running = true;
+    bot.log("chat detector started", { jogador: state.playerName });
+    return true;
+  }
+
+  function stop(options = {}) {
+    const { persistEnabled = true } = options;
+
+    if (state.timerId != null) {
+      window.clearInterval(state.timerId);
+      state.timerId = null;
+    }
+    state.running = false;
+
+    if (persistEnabled) {
+      config.enabled = false;
+      persistConfig();
+    }
+
+    bot.log("chat detector stopped");
+    return true;
+  }
+
+  function updateConfig(overrides = {}) {
+    Object.assign(config, overrides);
+    persistConfig();
+    return { ...config };
+  }
+
+  function addIgnored(termo) {
+    const t = (termo || "").trim();
+    if (!t) return false;
+    if ((config.ignorarSeContiver || []).some((x) => x.toLowerCase() === t.toLowerCase())) {
+      return false;
+    }
+    config.ignorarSeContiver = [...(config.ignorarSeContiver || []), t];
+    persistConfig();
+    return true;
+  }
+
+  function removeIgnored(termo) {
+    config.ignorarSeContiver = (config.ignorarSeContiver || []).filter((x) => x !== termo);
+    persistConfig();
+    return true;
+  }
+
+  function addWatched(termo) {
+    const t = (termo || "").trim();
+    if (!t) return false;
+    if ((config.termosVigiados || []).some((x) => x.toLowerCase() === t.toLowerCase())) {
+      return false;
+    }
+    config.termosVigiados = [...(config.termosVigiados || []), t];
+    persistConfig();
+    return true;
+  }
+
+  function removeWatched(termo) {
+    config.termosVigiados = (config.termosVigiados || []).filter((x) => x !== termo);
+    persistConfig();
+    return true;
+  }
+
+  function status() {
+    return {
+      running: state.running,
+      playerName: state.playerName,
+      config: { ...config },
+    };
+  }
+
+  if (config.enabled) {
+    start();
+  }
+
+  bot.Chatdetector = {
+    start,
+    stop,
+    status,
+    updateConfig,
+    addIgnored,
+    removeIgnored,
+    addWatched,
+    removeWatched,
+  };
+
+  bot.addCleanup(() => stop({ persistEnabled: false }));
+};
+
   window.__minibiaBotBundle.installUHPlayerModule(bot);
+  window.__minibiaBotBundle.installChatdetectorModule(bot);
   window.__minibiaBotBundle.installAutoAttackModule(bot);
   window.__minibiaBotBundle.installCaveModule(bot);
   window.__minibiaBotBundle.installPanicModule(bot);
@@ -4921,6 +5337,8 @@ window.__minibiaBotBundle.installUHPlayerModule = function installUHPlayerModule
     { id: "gmpanic", label: "GM Panic" },
     { id: "drop", label: "Drop" },
     { id: "pz", label: "PZ" },
+    { id: "chat", label: "Chat" },
+    { id: "fire", label: "Fire" },
     { id: "profiles", label: "Profiles" },
   ];
   let activeTab = "rune";
@@ -5674,13 +6092,165 @@ window.__minibiaBotBundle.installUHPlayerModule = function installUHPlayerModule
     return wrap;
   }
 
+  // ===== ABA: CHAT (detector de mensagens, alarme sonoro) =====
+  function buildChatTab() {
+    const wrap = el("div");
+
+    const statusEl = el("div", "margin-bottom:8px; font-size:11px;");
+    statusEl.dataset.chatStatus = "1";
+    wrap.appendChild(statusEl);
+
+    const anyRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer; color:#ccc;");
+    const anyCheckbox = el("input");
+    anyCheckbox.type = "checkbox";
+    anyCheckbox.checked = !!bot.Chatdetector.status().config.alarmarQualquer;
+    anyCheckbox.onchange = () => bot.Chatdetector.updateConfig({ alarmarQualquer: anyCheckbox.checked });
+    anyRow.appendChild(anyCheckbox);
+    anyRow.appendChild(document.createTextNode("Alarme em qualquer mensagem"));
+    wrap.appendChild(anyRow);
+
+    const mentionRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer; color:#ccc;");
+    const mentionCheckbox = el("input");
+    mentionCheckbox.type = "checkbox";
+    mentionCheckbox.checked = !!bot.Chatdetector.status().config.alarmarMencao;
+    mentionCheckbox.onchange = () => bot.Chatdetector.updateConfig({ alarmarMencao: mentionCheckbox.checked });
+    mentionRow.appendChild(mentionCheckbox);
+    mentionRow.appendChild(document.createTextNode("Alarme quando me mencionarem"));
+    wrap.appendChild(mentionRow);
+
+    const watchedRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer; color:#ccc;");
+    const watchedCheckbox = el("input");
+    watchedCheckbox.type = "checkbox";
+    watchedCheckbox.checked = !!bot.Chatdetector.status().config.alarmarVigiados;
+    watchedCheckbox.onchange = () => bot.Chatdetector.updateConfig({ alarmarVigiados: watchedCheckbox.checked });
+    watchedRow.appendChild(watchedCheckbox);
+    watchedRow.appendChild(document.createTextNode("Alarme em termos vigiados"));
+    wrap.appendChild(watchedRow);
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Termos vigiados:"));
+    const watchedListEl = el("div", "max-height:60px; overflow-y:auto; margin-bottom:6px; background:#111; border-radius:4px; padding:4px;");
+    wrap.appendChild(watchedListEl);
+    const watchedInputRow = el("div", "display:flex; gap:4px; margin-bottom:8px;");
+    const watchedInput = el("input", "flex:1; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee;");
+    watchedInput.placeholder = "termo pra vigiar";
+    function addWatchedTerm() {
+      if (bot.Chatdetector.addWatched(watchedInput.value.trim())) { watchedInput.value = ""; renderWatchedList(); }
+    }
+    const addWatchedBtn = el("button", "padding:4px 10px; border:none; border-radius:4px; background:#2d7a2d; color:#fff; cursor:pointer;", "+");
+    addWatchedBtn.onclick = addWatchedTerm;
+    watchedInput.onkeydown = (e) => { if (e.key === "Enter") addWatchedTerm(); };
+    watchedInputRow.appendChild(watchedInput);
+    watchedInputRow.appendChild(addWatchedBtn);
+    wrap.appendChild(watchedInputRow);
+
+    function renderWatchedList() {
+      watchedListEl.innerHTML = "";
+      const terms = bot.Chatdetector.status().config.termosVigiados || [];
+      if (!terms.length) {
+        watchedListEl.appendChild(el("div", "color:#666; font-style:italic; font-size:11px;", "(nenhum)"));
+        return;
+      }
+      terms.forEach((term) => {
+        const row = el("div", "display:flex; justify-content:space-between; align-items:center; padding:2px 0; font-size:11px;");
+        row.appendChild(el("span", null, term));
+        const removeBtn = el("span", "color:#e77; cursor:pointer; padding:0 4px;", "✕");
+        removeBtn.onclick = () => { bot.Chatdetector.removeWatched(term); renderWatchedList(); };
+        row.appendChild(removeBtn);
+        watchedListEl.appendChild(row);
+      });
+    }
+    renderWatchedList();
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Ignorar mensagens com:"));
+    const ignoredListEl = el("div", "max-height:60px; overflow-y:auto; margin-bottom:6px; background:#111; border-radius:4px; padding:4px;");
+    wrap.appendChild(ignoredListEl);
+    const ignoredInputRow = el("div", "display:flex; gap:4px; margin-bottom:8px;");
+    const ignoredInput = el("input", "flex:1; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee;");
+    ignoredInput.placeholder = "palavra pra ignorar";
+    function addIgnoredTerm() {
+      if (bot.Chatdetector.addIgnored(ignoredInput.value.trim())) { ignoredInput.value = ""; renderIgnoredList(); }
+    }
+    const addIgnoredBtn = el("button", "padding:4px 10px; border:none; border-radius:4px; background:#2d7a2d; color:#fff; cursor:pointer;", "+");
+    addIgnoredBtn.onclick = addIgnoredTerm;
+    ignoredInput.onkeydown = (e) => { if (e.key === "Enter") addIgnoredTerm(); };
+    ignoredInputRow.appendChild(ignoredInput);
+    ignoredInputRow.appendChild(addIgnoredBtn);
+    wrap.appendChild(ignoredInputRow);
+
+    function renderIgnoredList() {
+      ignoredListEl.innerHTML = "";
+      const terms = bot.Chatdetector.status().config.ignorarSeContiver || [];
+      if (!terms.length) {
+        ignoredListEl.appendChild(el("div", "color:#666; font-style:italic; font-size:11px;", "(nenhum)"));
+        return;
+      }
+      terms.forEach((term) => {
+        const row = el("div", "display:flex; justify-content:space-between; align-items:center; padding:2px 0; font-size:11px;");
+        row.appendChild(el("span", null, term));
+        const removeBtn = el("span", "color:#e77; cursor:pointer; padding:0 4px;", "✕");
+        removeBtn.onclick = () => { bot.Chatdetector.removeIgnored(term); renderIgnoredList(); };
+        row.appendChild(removeBtn);
+        ignoredListEl.appendChild(row);
+      });
+    }
+    renderIgnoredList();
+
+    const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshToggle() {
+      const running = bot.Chatdetector.status().running;
+      toggleBtn.textContent = running ? "Stop Chat Detector" : "Start Chat Detector";
+      toggleBtn.style.background = running ? "#a33" : "#2d7a2d";
+    }
+    toggleBtn.onclick = () => {
+      bot.Chatdetector.status().running ? bot.Chatdetector.stop() : bot.Chatdetector.start();
+      refreshToggle();
+    };
+    refreshToggle();
+    toggleBtn.dataset.refreshable = "1";
+    toggleBtn._refresh = refreshToggle;
+    wrap.appendChild(toggleBtn);
+
+    return wrap;
+  }
+
+  // ===== ABA: FIRE (passo manual através de campo perigoso, junto com Cave) =====
+  function buildFireTab() {
+    const wrap = el("div");
+
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:8px;", "Quando o Cave (ou qualquer rota ativa) fica preso num campo perigoso (fogo, energia, veneno), dá um passo manual através dele — igual apertar a seta."));
+
+    const statusEl = el("div", "margin-bottom:4px; font-size:11px;");
+    statusEl.dataset.fireStatus = "1";
+    wrap.appendChild(statusEl);
+
+    const countEl = el("div", "margin-bottom:8px; color:#9c9; font-size:11px;");
+    countEl.dataset.fireCount = "1";
+    wrap.appendChild(countEl);
+
+    const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshToggle() {
+      toggleBtn.textContent = HazardStepper.running ? "Stop Fire Stepper" : "Start Fire Stepper";
+      toggleBtn.style.background = HazardStepper.running ? "#a33" : "#2d7a2d";
+    }
+    toggleBtn.onclick = () => {
+      HazardStepper.running ? HazardStepper.stop() : HazardStepper.start();
+      refreshToggle();
+    };
+    refreshToggle();
+    toggleBtn.dataset.refreshable = "1";
+    toggleBtn._refresh = refreshToggle;
+    wrap.appendChild(toggleBtn);
+
+    return wrap;
+  }
+
   const tabBuilders = {
     rune: buildRuneTab, haste: buildHasteTab, eat: buildEatTab, ring: buildRingTab,
     monk: buildMonkTab, stones: buildStonesTab, panic: buildPanicTab, heal: buildHealTab,
     invisible: buildInvisibleTab, magicshield: buildMagicShieldTab, follow: buildFollowTab,
     friendheal: buildFriendHealTab, lasttarget: buildLastTargetTab, profiles: buildProfilesTab,
     attack: buildAttackTab, uhplayer: buildUhPlayerTab, cave: buildCaveTab, gmpanic: buildGmPanicTab, drop: buildDropTab,
-    pz: buildPzTab,
+    pz: buildPzTab, chat: buildChatTab, fire: buildFireTab,
   };
 
   function renderBody() {
@@ -5790,6 +6360,23 @@ window.__minibiaBotBundle.installUHPlayerModule = function installUHPlayerModule
         uhplayerStatusEl.style.color = s.runeAvailable ? "#5c5" : "#e77";
       }
     }
+
+    // ── Chat ──
+    const chatStatusEl = bodyEl.querySelector("[data-chat-status]");
+    if (chatStatusEl && bot.Chatdetector) {
+      const s = bot.Chatdetector.status();
+      chatStatusEl.textContent = s.running ? "● Monitorando chat (" + (s.playerName || "?") + ")" : "○ Parado";
+      chatStatusEl.style.color = s.running ? "#5c5" : "#999";
+    }
+
+    // ── Fire ──
+    const fireStatusEl = bodyEl.querySelector("[data-fire-status]");
+    if (fireStatusEl) {
+      fireStatusEl.textContent = HazardStepper.running ? "● Rodando (" + HazardStepper.status + ")" : "○ Parado";
+      fireStatusEl.style.color = HazardStepper.running ? "#5c5" : "#999";
+    }
+    const fireCountEl = bodyEl.querySelector("[data-fire-count]");
+    if (fireCountEl) fireCountEl.textContent = "Campos atravessados: " + HazardStepper.stepsCount;
   }
 
   // Arrasta o painel com mouse (desktop) e touch (celular/tablet)
@@ -5907,6 +6494,7 @@ window.__minibiaBotBundle.installUHPlayerModule = function installUHPlayerModule
     Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget, Profiles,
     Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
     UhPlayer: bot.uhPlayer, AttackSpellCaster,
+    Chatdetector: bot.Chatdetector, HazardStepper,
   };
-  log("carregado. Painel com 20 abas criado no canto da tela.");
+  log("carregado. Painel com 22 abas criado no canto da tela.");
 })();
