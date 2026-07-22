@@ -3,7 +3,10 @@
   const externalBot = window.minibiaBot;
   const STORAGE_PREFIX = "allInOne.";
 
+  let quietMode = localStorage.getItem(STORAGE_PREFIX + "performanceMode.quiet") === "true";
+
   function log(...args) {
+    if (quietMode) return;
     console.log("[allInOne]", ...args);
   }
 
@@ -1148,6 +1151,202 @@
     }
 
     return { start, stop, get running() { return state.running; }, get status() { return lastStatus; } };
+  })();
+
+  // ===== MÓDULO: PERFORMANCE MODE (silencia logs + desativa animações CSS) =====
+  const PerformanceMode = (() => {
+    const KEY = "performanceMode.config";
+    const config = Object.assign({ enabled: false }, bot.storage.get(KEY, {}));
+    const state = { active: false, styleEl: null };
+
+    function persist() { bot.storage.set(KEY, { ...config }); }
+
+    function injectCss() {
+      if (state.styleEl) return;
+      state.styleEl = document.createElement("style");
+      state.styleEl.id = "allInOne-performance-mode-css";
+      state.styleEl.textContent = `
+        *, *::before, *::after {
+          animation-duration: 0.001s !important;
+          animation-delay: 0s !important;
+          transition-duration: 0.001s !important;
+          transition-delay: 0s !important;
+          scroll-behavior: auto !important;
+        }
+      `;
+      document.head.appendChild(state.styleEl);
+    }
+
+    function removeCss() {
+      if (state.styleEl) {
+        state.styleEl.remove();
+        state.styleEl = null;
+      }
+    }
+
+    function start() {
+      if (state.active) return;
+      state.active = true;
+      config.enabled = true;
+      quietMode = true;
+      localStorage.setItem(STORAGE_PREFIX + "performanceMode.quiet", "true");
+      persist();
+      injectCss();
+      console.log("[allInOne] Performance Mode ativado (logs silenciados, animações desativadas)");
+      updatePanel();
+    }
+
+    function stop() {
+      state.active = false;
+      config.enabled = false;
+      quietMode = false;
+      localStorage.setItem(STORAGE_PREFIX + "performanceMode.quiet", "false");
+      persist();
+      removeCss();
+      console.log("[allInOne] Performance Mode desativado");
+      updatePanel();
+    }
+
+    if (config.enabled) start();
+
+    return { config, start, stop, get running() { return state.active; } };
+  })();
+
+  // ===== MÓDULO: ZOOM BLOCKER (bloqueia zoom do navegador via ctrl+scroll, ctrl+/-, pinça) =====
+  const ZoomBlocker = (() => {
+    const KEY = "zoomBlocker.config";
+    const config = Object.assign({ enabled: false }, bot.storage.get(KEY, {}));
+    const state = { active: false };
+
+    function persist() { bot.storage.set(KEY, { ...config }); }
+
+    function onWheel(e) {
+      if (e.ctrlKey) e.preventDefault();
+    }
+    function onKeydown(e) {
+      if (e.ctrlKey && ["+", "-", "=", "0"].includes(e.key)) e.preventDefault();
+    }
+    function onGesture(e) {
+      e.preventDefault();
+    }
+
+    function applyViewportMeta() {
+      let meta = document.querySelector('meta[name="viewport"]');
+      if (!meta) {
+        meta = document.createElement("meta");
+        meta.name = "viewport";
+        document.head.appendChild(meta);
+      }
+      meta.dataset.zoomBlockerOriginal = meta.dataset.zoomBlockerOriginal ?? meta.content ?? "";
+      meta.content = "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no";
+    }
+
+    function restoreViewportMeta() {
+      const meta = document.querySelector('meta[name="viewport"]');
+      if (meta && meta.dataset.zoomBlockerOriginal !== undefined) {
+        meta.content = meta.dataset.zoomBlockerOriginal;
+        delete meta.dataset.zoomBlockerOriginal;
+      }
+    }
+
+    function start() {
+      if (state.active) return;
+      state.active = true;
+      config.enabled = true;
+      persist();
+      window.addEventListener("wheel", onWheel, { passive: false });
+      window.addEventListener("keydown", onKeydown, { passive: false });
+      document.addEventListener("gesturestart", onGesture, { passive: false });
+      document.addEventListener("gesturechange", onGesture, { passive: false });
+      applyViewportMeta();
+      log("zoom blocker ativado");
+      updatePanel();
+    }
+
+    function stop() {
+      if (!state.active) { config.enabled = false; persist(); return; }
+      state.active = false;
+      config.enabled = false;
+      persist();
+      window.removeEventListener("wheel", onWheel, { passive: false });
+      window.removeEventListener("keydown", onKeydown, { passive: false });
+      document.removeEventListener("gesturestart", onGesture, { passive: false });
+      document.removeEventListener("gesturechange", onGesture, { passive: false });
+      restoreViewportMeta();
+      log("zoom blocker desativado");
+      updatePanel();
+    }
+
+    if (config.enabled) start();
+
+    return { config, start, stop, get running() { return state.active; } };
+  })();
+
+  // ===== MÓDULO: SWIPE NAV BLOCKER (bloqueia gesto de voltar/avançar por swipe lateral) =====
+  const SwipeNavBlocker = (() => {
+    const KEY = "swipeNavBlocker.config";
+    const config = Object.assign({ enabled: false }, bot.storage.get(KEY, {}));
+    const state = { active: false, touchStartX: 0, touchStartY: 0 };
+
+    function persist() { bot.storage.set(KEY, { ...config }); }
+
+    function onTouchStart(e) {
+      state.touchStartX = e.touches[0].clientX;
+      state.touchStartY = e.touches[0].clientY;
+    }
+    function onTouchMove(e) {
+      const touchEndX = e.touches[0].clientX;
+      const touchEndY = e.touches[0].clientY;
+      const diffX = touchEndX - state.touchStartX;
+      const diffY = touchEndY - state.touchStartY;
+      if (Math.abs(diffX) > Math.abs(diffY)) e.preventDefault();
+    }
+    function onWheel(e) {
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) e.preventDefault();
+    }
+
+    function applyOverscroll() {
+      document.body.dataset.swipeBlockerOriginalBody = document.body.style.overscrollBehaviorX || "";
+      document.documentElement.dataset.swipeBlockerOriginalHtml = document.documentElement.style.overscrollBehaviorX || "";
+      document.body.style.overscrollBehaviorX = "none";
+      document.documentElement.style.overscrollBehaviorX = "none";
+    }
+    function restoreOverscroll() {
+      document.body.style.overscrollBehaviorX = document.body.dataset.swipeBlockerOriginalBody || "";
+      document.documentElement.style.overscrollBehaviorX = document.documentElement.dataset.swipeBlockerOriginalHtml || "";
+      delete document.body.dataset.swipeBlockerOriginalBody;
+      delete document.documentElement.dataset.swipeBlockerOriginalHtml;
+    }
+
+    function start() {
+      if (state.active) return;
+      state.active = true;
+      config.enabled = true;
+      persist();
+      document.addEventListener("touchstart", onTouchStart, { passive: true });
+      document.addEventListener("touchmove", onTouchMove, { passive: false });
+      window.addEventListener("wheel", onWheel, { passive: false });
+      applyOverscroll();
+      log("swipe nav blocker ativado");
+      updatePanel();
+    }
+
+    function stop() {
+      if (!state.active) { config.enabled = false; persist(); return; }
+      state.active = false;
+      config.enabled = false;
+      persist();
+      document.removeEventListener("touchstart", onTouchStart, { passive: true });
+      document.removeEventListener("touchmove", onTouchMove, { passive: false });
+      window.removeEventListener("wheel", onWheel, { passive: false });
+      restoreOverscroll();
+      log("swipe nav blocker desativado");
+      updatePanel();
+    }
+
+    if (config.enabled) start();
+
+    return { config, start, stop, get running() { return state.active; } };
   })();
 
   // ===== MÓDULO: HAZARD STEPPER (passo manual através de fogo/campos perigosos) =====
@@ -5420,6 +5619,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     { id: "pz", label: "PZ" },
     { id: "chat", label: "Chat" },
     { id: "fire", label: "Fire" },
+    { id: "misc", label: "Misc" },
     { id: "profiles", label: "Profiles" },
   ];
   let activeTab = "rune";
@@ -6339,13 +6539,77 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     return wrap;
   }
 
+  // ===== ABA: MISC (funções diversas — zoom blocker, e mais quando você mandar) =====
+  function buildMiscTab() {
+    const wrap = el("div");
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-bottom:4px;", "🔍 Bloquear zoom do navegador"));
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:6px;", "Bloqueia Ctrl+scroll, Ctrl +/-/0, e gestos de pinça (touch/trackpad)."));
+
+    const zoomToggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff; margin-bottom:4px;");
+    function refreshZoomToggle() {
+      zoomToggleBtn.textContent = ZoomBlocker.running ? "Desativar bloqueio de zoom" : "Ativar bloqueio de zoom";
+      zoomToggleBtn.style.background = ZoomBlocker.running ? "#a33" : "#2d7a2d";
+    }
+    zoomToggleBtn.onclick = () => {
+      ZoomBlocker.running ? ZoomBlocker.stop() : ZoomBlocker.start();
+      refreshZoomToggle();
+    };
+    refreshZoomToggle();
+    zoomToggleBtn.dataset.refreshable = "1";
+    zoomToggleBtn._refresh = refreshZoomToggle;
+    wrap.appendChild(zoomToggleBtn);
+
+    wrap.appendChild(el("div", "border-top:1px solid #333; margin:10px 0 6px;"));
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-bottom:4px;", "👆 Bloquear swipe voltar/avançar"));
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:6px;", "Bloqueia o gesto lateral (touch/trackpad) que faz o navegador voltar/avançar de página."));
+
+    const swipeToggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshSwipeToggle() {
+      swipeToggleBtn.textContent = SwipeNavBlocker.running ? "Desativar bloqueio de swipe" : "Ativar bloqueio de swipe";
+      swipeToggleBtn.style.background = SwipeNavBlocker.running ? "#a33" : "#2d7a2d";
+    }
+    swipeToggleBtn.onclick = () => {
+      SwipeNavBlocker.running ? SwipeNavBlocker.stop() : SwipeNavBlocker.start();
+      refreshSwipeToggle();
+    };
+    refreshSwipeToggle();
+    swipeToggleBtn.dataset.refreshable = "1";
+    swipeToggleBtn._refresh = refreshSwipeToggle;
+    wrap.appendChild(swipeToggleBtn);
+
+    wrap.appendChild(el("div", "border-top:1px solid #333; margin:10px 0 6px;"));
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-bottom:4px;", "⚡ Modo Performance"));
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:6px;", "Silencia os logs do console e desativa animações/transições CSS da página — reduz consumo de CPU, principalmente com vários módulos ativos ao mesmo tempo."));
+
+    const perfToggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshPerfToggle() {
+      perfToggleBtn.textContent = PerformanceMode.running ? "Desativar Performance Mode" : "Ativar Performance Mode";
+      perfToggleBtn.style.background = PerformanceMode.running ? "#a33" : "#2d7a2d";
+    }
+    perfToggleBtn.onclick = () => {
+      PerformanceMode.running ? PerformanceMode.stop() : PerformanceMode.start();
+      refreshPerfToggle();
+    };
+    refreshPerfToggle();
+    perfToggleBtn.dataset.refreshable = "1";
+    perfToggleBtn._refresh = refreshPerfToggle;
+    wrap.appendChild(perfToggleBtn);
+
+    // (espaço reservado pra próxima função que você mandar)
+
+    return wrap;
+  }
+
   const tabBuilders = {
     rune: buildRuneTab, haste: buildHasteTab, eat: buildEatTab, ring: buildRingTab,
     monk: buildMonkTab, stones: buildStonesTab, panic: buildPanicTab, heal: buildHealTab,
     invisible: buildInvisibleTab, magicshield: buildMagicShieldTab, follow: buildFollowTab,
     friendheal: buildFriendHealTab, lasttarget: buildLastTargetTab, profiles: buildProfilesTab,
     attack: buildAttackTab, uhplayer: buildUhPlayerTab, cave: buildCaveTab, gmpanic: buildGmPanicTab, drop: buildDropTab,
-    pz: buildPzTab, chat: buildChatTab, fire: buildFireTab,
+    pz: buildPzTab, chat: buildChatTab, fire: buildFireTab, misc: buildMiscTab,
   };
 
   function renderBody() {
@@ -6595,6 +6859,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
     UhPlayer: bot.uhPlayer, AttackSpellCaster,
     Chatdetector: bot.Chatdetector, HazardStepper, PzReturner,
+    ZoomBlocker, SwipeNavBlocker, PerformanceMode,
   };
-  log("carregado. Painel com 22 abas criado no canto da tela.");
+  log("carregado. Painel com 23 abas criado no canto da tela.");
 })();
