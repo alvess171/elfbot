@@ -5629,12 +5629,711 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
   bot.addCleanup(() => stop({ persistEnabled: false }));
 };
 
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
+  const configStorageKey = "minibiaBot.talk.config";
+  const legacyDefaultModels = ["gemini-3-pro-preview", "gemini-2.0-flash"];
+  const defaultModel = "gemini-flash-latest";
+  const defaultSystemPrompt =
+    "You are a Tibia player in a live chat. Reply casually, lowercase, max 8 words. Always reply in the same language the other player used (Portuguese in, Portuguese out). Plain text only, no quotes. Never say you are a bot or AI.";
+  const defaultGreetingPrompt =
+    "Respond to greetings like a Tibia MMORPG player in chat. Be short, casual, friendly, and in-character for fast Tibia-style game chat. Use lowercase. One sentence only. Plain text only.";
+  const defaultQuestionPrompt =
+    "Respond to questions like a Tibia MMORPG player in chat, but stay vague and noncommittal. Keep it brief, casual, and a little evasive. Use lowercase and do not explain much. One short sentence only. Plain text only. If asked whether you are a bot, reply with no.";
+  const defaultStatementPrompt =
+    "Respond to statements like a Tibia MMORPG player in chat. Keep it short, casual, reactive, and natural for live Tibia-style game chat. Use lowercase. One sentence only. Plain text only.";
+  const minPollMs = 1000;
+  const maxMessageAgeMs = 2 * 60 * 1000;
+  const state = {
+    running: false,
+    pending: false,
+    timerId: null,
+    lastReplyAt: 0,
+    seenKeys: [],
+    seenSignatures: [],
+  };
+  const greetingReplies = ["yo", "sup", "hey", "hiya", "yo lol"];
+  const agreeReplies = ["true", "fr", "based", "ya", "real"];
+  const vagueQuestionReplies = ["maybe", "not sure", "hard to say", "could be"];
+  const denyBotReplies = ["no", "nope", "nah"];
+
+  const configStoredKey = "AQ.Ab8RN6ILII9kxHuAfAI_l974MI6HfnukZg1uLTZTKDjP01OUug"; // 🔐 CHAVE FIXA DO SCRIPT
+  
+  const defaultConfig = {
+    enabled: true,
+    apiKey: configStoredKey, // ✅ CHAVE SEMPRE VINDA DO SCRIPT
+    model: defaultModel,
+    pollMs: minPollMs,
+    replyCooldownMs: 1500,
+    systemPrompt: defaultSystemPrompt,
+    greetingPrompt: defaultGreetingPrompt,
+    questionPrompt: defaultQuestionPrompt,
+    statementPrompt: defaultStatementPrompt,
+  };
+  
+  // 🔧 Merge inteligente: localStorage só pra outros campos, NUNCA pra apiKey
+  const storedConfig = bot.storage.get(configStorageKey, {});
+  const config = Object.assign(
+    {},
+    defaultConfig,
+    storedConfig,
+    { apiKey: configStoredKey } // ✅ FORÇA A CHAVE DO SCRIPT SEMPRE
+  );
+
+  function persistConfig() {
+    // ✅ Garante que a chave do script é SEMPRE salva
+    const configToSave = { ...config };
+    configToSave.apiKey = configStoredKey;
+    bot.storage.set(configStorageKey, configToSave);
+  }
+
+  function normalizeText(value) {
+    return String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  function sanitizeConfig() {
+    config.apiKey = configStoredKey; // ✅ SEMPRE usa a chave do script
+    config.model = String(config.model || defaultModel).trim() || defaultModel;
+    if (legacyDefaultModels.includes(config.model)) {
+      config.model = defaultModel;
+    }
+    config.pollMs = Math.max(minPollMs, Number(config.pollMs) || minPollMs);
+    config.replyCooldownMs = Math.max(0, Number(config.replyCooldownMs) || 1500);
+    config.systemPrompt = String(config.systemPrompt || defaultSystemPrompt).trim() || defaultSystemPrompt;
+    config.greetingPrompt = String(config.greetingPrompt || defaultGreetingPrompt).trim() || defaultGreetingPrompt;
+    config.questionPrompt = String(config.questionPrompt || defaultQuestionPrompt).trim() || defaultQuestionPrompt;
+    config.statementPrompt = String(config.statementPrompt || defaultStatementPrompt).trim() || defaultStatementPrompt;
+  }
+
+  function trimSeen() {
+    const maxSeenEntries = 200;
+    if (state.seenKeys.length > maxSeenEntries) {
+      state.seenKeys = state.seenKeys.slice(-maxSeenEntries);
+    }
+
+    if (state.seenSignatures.length > maxSeenEntries) {
+      state.seenSignatures = state.seenSignatures.slice(-maxSeenEntries);
+    }
+  }
+
+  function getSelfNames() {
+    return new Set(
+      ["you", bot.getPlayerName?.(), window.gameClient?.player?.name, window.gameClient?.player?.state?.name]
+        .map((name) => normalizeText(name))
+        .filter(Boolean)
+    );
+  }
+
+  function extractSenderFromMessage(message) {
+    const text = String(message || "").trim();
+    if (!text) {
+      return { sender: null, body: "" };
+    }
+
+    const patterns = [
+      /^\[[^\]]+\]\s*([^:\n]{2,40}):\s+(.+)$/i,
+      /^([^:\n]{2,40}):\s+(.+)$/i,
+      /^([^:\n]{2,40})\s+says:\s+(.+)$/i,
+      /^From\s+([^:\n]{2,40}):\s+(.+)$/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) {
+        return {
+          sender: String(match[1] || "").trim() || null,
+          body: String(match[2] || "").trim(),
+        };
+      }
+    }
+
+    return { sender: null, body: text };
+  }
+
+  function getRawChatEntries() {
+    return (window.gameClient?.interface?.channelManager?.channels || []).flatMap((channel) =>
+      (channel?.__contents || []).map((entry, index) => ({
+        channelName: channel?.name || null,
+        entry,
+        index,
+      }))
+    );
+  }
+
+  function toChatMessage(rawEntry) {
+    const entry = rawEntry?.entry || {};
+    const rawMessage = String(entry?.message || entry?.text || "").trim();
+    const parsed = extractSenderFromMessage(rawMessage);
+    const sender =
+      String(entry?.author || entry?.sender || entry?.name || parsed.sender || "").trim() || null;
+    const body = String(entry?.text || parsed.body || rawMessage).trim();
+    const time = entry?.__time || entry?.time || null;
+    const senderType = entry?.type;
+    const key = [
+      rawEntry?.channelName || "",
+      time || "",
+      sender || "",
+      rawMessage || "",
+      rawEntry?.index || 0,
+    ].join("|");
+
+    return {
+      key,
+      channelName: rawEntry?.channelName || null,
+      sender,
+      body,
+      rawMessage,
+      time,
+      senderType,
+    };
+  }
+
+  function getChatMessages() {
+    return getRawChatEntries().map(toChatMessage).filter((message) => message.body);
+  }
+
+  function getMessageTimestamp(message) {
+    const rawTime = message?.time;
+    if (typeof rawTime === "number" && Number.isFinite(rawTime)) {
+      return rawTime < 1e12 ? rawTime * 1000 : rawTime;
+    }
+
+    if (rawTime instanceof Date) {
+      return rawTime.getTime();
+    }
+
+    const parsed = Date.parse(String(rawTime || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function getMessageSignature(message) {
+    return [
+      normalizeText(message?.channelName),
+      normalizeText(message?.sender),
+      normalizeText(message?.body || message?.rawMessage),
+      String(getMessageTimestamp(message) || ""),
+    ].join("|");
+  }
+
+  function hasSeenMessage(message) {
+    return state.seenKeys.includes(message?.key) || state.seenSignatures.includes(getMessageSignature(message));
+  }
+
+  function rememberSeenMessage(message) {
+    if (!message) {
+      return;
+    }
+
+    if (message.key && !state.seenKeys.includes(message.key)) {
+      state.seenKeys.push(message.key);
+    }
+
+    const signature = getMessageSignature(message);
+    if (signature && !state.seenSignatures.includes(signature)) {
+      state.seenSignatures.push(signature);
+    }
+
+    trimSeen();
+  }
+
+  function rememberSeenMessages(messages) {
+    messages.forEach((message) => rememberSeenMessage(message));
+  }
+
+  function isSelfMessage(message) {
+    if (getSelfNames().has(normalizeText(message?.sender))) {
+      return true;
+    }
+
+    return [message?.body, message?.rawMessage].some((text) => bot.isRecentSentChat?.(text, 20000));
+  }
+
+  function isTrustedSender(message) {
+    const senderName = normalizeText(message?.sender);
+    if (!senderName) {
+      return false;
+    }
+
+    const trustedNames = bot.panic?.getTrustedNames?.() || [];
+    return trustedNames.includes(senderName);
+  }
+
+  function isNpcMessage(message) {
+    const npcType = window.CONST?.TYPES?.NPC;
+    return npcType != null && message?.senderType === npcType;
+  }
+
+  function isWithinVisibleRange(me, pos) {
+    if (!me || !pos) {
+      return false;
+    }
+
+    const dx = Math.abs(pos.x - me.x);
+    const dy = Math.abs(pos.y - me.y);
+    return dx <= 8 && dy <= 6;
+  }
+
+  function isSenderVisiblePlayer(message) {
+    const me = bot.getPlayerPosition?.();
+    const myId = window.gameClient?.player?.id;
+    const senderName = normalizeText(message?.sender);
+    const playerType = window.CONST?.TYPES?.PLAYER;
+
+    if (!me || !senderName || playerType == null) {
+      return false;
+    }
+
+    return Object.values(window.gameClient?.world?.activeCreatures || {}).some((creature) => {
+      if (!creature) {
+        return false;
+      }
+
+      if (creature.id === myId || creature.type !== playerType) {
+        return false;
+      }
+
+      if (normalizeText(creature.name) !== senderName) {
+        return false;
+      }
+
+      return isWithinVisibleRange(me, creature.__position);
+    });
+  }
+
+  function getDefaultMessages() {
+    return getChatMessages().filter((message) => message.channelName === "Default");
+  }
+
+  function getNewestPendingMessage() {
+    const pendingMessages = getDefaultMessages().filter((message) => {
+      if (!message?.body || !message?.key) {
+        return false;
+      }
+
+      if (hasSeenMessage(message)) {
+        return false;
+      }
+
+      if (!message.sender || isSelfMessage(message) || isNpcMessage(message) || isTrustedSender(message)) {
+        rememberSeenMessage(message);
+        return false;
+      }
+
+      const timestamp = getMessageTimestamp(message);
+      if (timestamp && Date.now() - timestamp > maxMessageAgeMs) {
+        rememberSeenMessage(message);
+        return false;
+      }
+
+      return true;
+    });
+
+    if (!pendingMessages.length) {
+      return null;
+    }
+
+    return {
+      targetMessage: pendingMessages[pendingMessages.length - 1],
+      pendingMessages,
+    };
+  }
+
+  function buildClassifierPrompt(targetMessage, contextMessages) {
+    const transcript = contextMessages
+      .map((message) => `${message.sender || "player"}: ${message.body}`)
+      .join("\n");
+
+    return [
+      "Channel: Default",
+      "Recent chat:",
+      transcript || "(none)",
+      "",
+      `Last message from ${targetMessage.sender}: ${targetMessage.body}`,
+      "Classify the last message as exactly one label:",
+      "greeting",
+      "question",
+      "statement",
+      "Reply with the label only.",
+    ].join("\n");
+  }
+
+  function getTypePrompt(messageType) {
+    if (messageType === "greeting") {
+      return config.greetingPrompt;
+    }
+
+    if (messageType === "question") {
+      return config.questionPrompt;
+    }
+
+    return config.statementPrompt;
+  }
+
+  function buildReplyPrompt(targetMessage, contextMessages, messageType) {
+    const transcript = contextMessages
+      .map((message) => `${isSelfMessage(message) ? "you" : (message.sender || "player")}: ${message.body}`)
+      .join("\n");
+
+    return [
+      config.systemPrompt,
+      getTypePrompt(messageType),
+      "",
+      "Channel: Default",
+      `Message type: ${messageType}`,
+      "Recent chat (lines marked 'you:' are your own previous replies):",
+      transcript || "(none)",
+      "",
+      `Last message from ${targetMessage.sender}: ${targetMessage.body}`,
+      "Reply in the SAME language the other person used. If they wrote in Portuguese, reply in Portuguese.",
+      "Continue the conversation naturally: react to what was actually said, and do not repeat any of your previous 'you:' lines.",
+      "Reply with one short sentence only.",
+      "Reply text only:",
+    ].join("\n");
+  }
+
+  async function generateText(prompt, generationConfig = {}) {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": config.apiKey,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: prompt }],
+            },
+          ],
+          generationConfig: Object.assign(
+            {
+              temperature: 0.9,
+              topP: 0.95,
+              maxOutputTokens: 800,
+            },
+            generationConfig
+          ),
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Gemini request failed (${response.status}): ${errorText}`);
+    }
+
+    const data = await response.json();
+    return (
+      data?.candidates?.[0]?.content?.parts
+        ?.map((part) => String(part?.text || ""))
+        .join(" ")
+        .trim() || ""
+    );
+  }
+
+  async function classifyMessageType(targetMessage, contextMessages) {
+    const rawType = normalizeText(
+      await generateText(buildClassifierPrompt(targetMessage, contextMessages), {
+        temperature: 0.1,
+        topP: 0.8,
+        maxOutputTokens: 500,
+      })
+    );
+
+    if (rawType === "greeting" || rawType === "question" || rawType === "statement") {
+      return rawType;
+    }
+
+    if (isGreeting(targetMessage?.body)) {
+      return "greeting";
+    }
+
+    if (/\?/.test(String(targetMessage?.body || ""))) {
+      return "question";
+    }
+
+    return "statement";
+  }
+
+  function sanitizeReply(text) {
+    const singleLine = String(text || "")
+      .replace(/\s+/g, " ")
+      .replace(/^["'`]+|["'`]+$/g, "")
+      .trim();
+
+    if (!singleLine) {
+      return "";
+    }
+
+    const firstSentence = singleLine.split(/(?<=[.!?])\s+/)[0] || singleLine;
+    const trimmed = firstSentence.slice(0, 90).trim();
+    if (!trimmed) {
+      return "";
+    }
+
+    if (trimmed === "?") {
+      return bot.isRecentSentChat?.("?", 20000) ? "" : "?";
+    }
+
+    const styled = trimmed
+      .toLowerCase()
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/\bi am\b/g, "im")
+      .replace(/\byou are\b/g, "youre")
+      .replace(/\bdo not\b/g, "dont")
+      .replace(/\bcannot\b/g, "cant")
+      .replace(/\bgoing to\b/g, "gonna")
+      .replace(/\bwant to\b/g, "wanna")
+      .replace(/\s+([,.!?])/g, "$1")
+      .replace(/([!?.,]){2,}/g, "$1")
+      .trim();
+
+    const normalized = normalizeText(styled);
+    if (!normalized || /^[^a-z0-9]+$/i.test(styled)) {
+      return "";
+    }
+
+    if (/\b(bot|ai|assistant|language model|automation|script)\b/i.test(styled)) {
+      return "";
+    }
+
+    if (bot.isRecentSentChat?.(styled, 20000)) {
+      return "";
+    }
+
+    return styled;
+  }
+
+  function pickUnusedReply(replies, withinMs = 30000, fallback = "?") {
+    for (const reply of replies) {
+      if (!bot.isRecentSentChat?.(reply, withinMs)) {
+        return reply;
+      }
+    }
+
+    return fallback;
+  }
+
+  function isGreeting(text) {
+    return /^(hi|hey|yo|sup|howdy|hello|hiya)\b/i.test(String(text || "").trim());
+  }
+
+  function isBotQuestion(text) {
+    return /\b(are you|u)\b.*\bbot\b|\bbot\b.*\?|\bare you a bot\b/i.test(String(text || ""));
+  }
+
+  function isSimpleReaction(text) {
+    return /^(based|true|real|lol|lmao|xd|nice|ok|kk|k)\b[!.?]*$/i.test(String(text || "").trim());
+  }
+
+  function pickFallbackReply(targetMessage, messageType) {
+    const messageText = String(targetMessage?.body || "").trim();
+
+    if (isBotQuestion(messageText)) {
+      return pickUnusedReply(denyBotReplies, 30000, "no");
+    }
+
+    if (messageType === "greeting" || isGreeting(messageText)) {
+      return pickUnusedReply(greetingReplies, 15000, "yo");
+    }
+
+    if (isSimpleReaction(messageText)) {
+      return pickUnusedReply(agreeReplies, 15000, "true");
+    }
+
+    if (messageType === "question" || /\?$/.test(messageText)) {
+      return pickUnusedReply(vagueQuestionReplies, 20000, "maybe");
+    }
+
+    return pickUnusedReply(["lol", "maybe", "ya", "true", "kinda"], 30000, "lol");
+  }
+
+  async function maybeRespond() {
+    if (!state.running || state.pending || !config.enabled || !config.apiKey) {
+      return false;
+    }
+
+    if (Date.now() - state.lastReplyAt < config.replyCooldownMs) {
+      return false;
+    }
+
+    const pending = getNewestPendingMessage();
+    if (!pending?.targetMessage) {
+      return false;
+    }
+
+    state.pending = true;
+
+    try {
+      const contextMessages = getDefaultMessages().slice(-12);
+      if (!isSenderVisiblePlayer(pending.targetMessage)) {
+        rememberSeenMessages(pending.pendingMessages);
+        bot.log("talk skipped reply", {
+          sender: pending.targetMessage.sender,
+          message: pending.targetMessage.body,
+          reason: "sender-not-visible",
+        });
+        return false;
+      }
+
+      const messageType = await classifyMessageType(pending.targetMessage, contextMessages);
+      const rawReply = isBotQuestion(pending.targetMessage.body)
+        ? "no"
+        : await generateText(buildReplyPrompt(pending.targetMessage, contextMessages, messageType));
+      const reply = sanitizeReply(rawReply) || pickFallbackReply(pending.targetMessage, messageType);
+
+      rememberSeenMessages(pending.pendingMessages);
+
+      if (!reply) {
+        bot.log("talk skipped reply", {
+          sender: pending.targetMessage.sender,
+          message: pending.targetMessage.body,
+          messageType,
+          rawReply,
+        });
+        return false;
+      }
+
+      const sent = bot.sendChat(reply);
+      if (sent) {
+        state.lastReplyAt = Date.now();
+        bot.log("talk replied", {
+          sender: pending.targetMessage.sender,
+          message: pending.targetMessage.body,
+          messageType,
+          reply,
+        });
+      }
+
+      return sent;
+    } finally {
+      state.pending = false;
+    }
+  }
+
+  function scheduleNextTick() {
+    if (!state.running) {
+      return;
+    }
+
+    state.timerId = window.setTimeout(async () => {
+      try {
+        await maybeRespond();
+      } catch (error) {
+        bot.log("talk request failed", error?.message || error);
+      }
+
+      scheduleNextTick();
+    }, config.pollMs);
+  }
+
+  function seedSeenMessages() {
+    rememberSeenMessages(getDefaultMessages());
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    sanitizeConfig();
+    persistConfig();
+
+    if (!config.apiKey) {
+      bot.log("AQ.Ab8RN6ILII9kxHuAfAI_l974MI6HfnukZg1uLTZTKDjP01OUug");
+      return false;
+    }
+
+    if (state.running) {
+      return false;
+    }
+
+    state.running = true;
+    seedSeenMessages();
+    bot.log("talk module started", {
+      model: config.model,
+      channel: "Default",
+    });
+    scheduleNextTick();
+    return true;
+  }
+
+  function stop(options = {}) {
+    const shouldPersistEnabled = options.persistEnabled !== false;
+    state.running = false;
+
+    if (shouldPersistEnabled) {
+      config.enabled = false;
+      persistConfig();
+    }
+
+    if (state.timerId != null) {
+      window.clearTimeout(state.timerId);
+      state.timerId = null;
+    }
+
+    return true;
+  }
+
+  function status() {
+    return {
+      running: state.running,
+      pending: state.pending,
+      lastReplyAt: state.lastReplyAt,
+      config: {
+        ...config,
+        apiKey: config.apiKey ? "***configured***" : "",
+      },
+    };
+  }
+
+  function updateConfig(nextConfig = {}) {
+    Object.assign(config, nextConfig);
+    sanitizeConfig();
+    persistConfig();
+    return status().config;
+  }
+
+  sanitizeConfig();
+  persistConfig(); // Força guardar a chave no localStorage
+  
+  // 🔧 Debug: Log se a chave foi carregada
+  console.log("[Talk Module] API Key loaded:", config.apiKey ? "✅ YES" : "❌ NO");
+  console.log("[Talk Module] Using script's API Key (hardcoded):", config.apiKey === configStoredKey ? "✅ SIM" : "❌ NÃO");
+
+  if (config.enabled && config.apiKey) {
+    start();
+  }
+
+  bot.talk = {
+    start,
+    stop,
+    status,
+    updateConfig,
+    getChatMessages,
+    maybeRespond,
+    config,
+  };
+};
   window.__minibiaBotBundle.installUHPlayerModule(bot);
   window.__minibiaBotBundle.installChatdetectorModule(bot);
   window.__minibiaBotBundle.installAutoAttackModule(bot);
   window.__minibiaBotBundle.installCaveModule(bot);
   window.__minibiaBotBundle.installPanicModule(bot);
   window.__minibiaBotBundle.installDropModule(bot);
+  
+  // ✅ Força usar a API Key do script, limpa localStorage se vazio
+  const talkStorageKey = "minibiaBot.talk.config";
+  const savedTalk = bot.storage.get(talkStorageKey, {});
+  if (!savedTalk.apiKey) {
+    bot.storage.remove(talkStorageKey); // Remove entrada inválida
+  }
+  
+  window.__minibiaBotBundle.installTalkModule(bot);
 
   // Aliases pra o panic.js conseguir integrar com os módulos já existentes no painel
   bot.rune = Rune;
@@ -5667,12 +6366,13 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     { id: "gmpanic", label: "GM Panic" },
     { id: "drop", label: "Drop" },
     { id: "pz", label: "PZ" },
+    { id: "talk", label: "Talk" },
     { id: "chat", label: "Chat" },
     { id: "fire", label: "Fire" },
     { id: "misc", label: "Misc" },
     { id: "profiles", label: "Profiles" },
   ];
-  let activeTab = "rune";
+  let activeTab = "talk";
 
   function el(tag, style, text) {
     const e = document.createElement(tag);
@@ -6605,6 +7305,84 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     return wrap;
   }
 
+  // ===== ABA: TALK (auto-responder com IA — Talk Module) =====
+  function buildTalkTab() {
+    const wrap = el("div");
+
+    const statusEl = el("div", "margin-bottom:8px; font-size:11px;");
+    statusEl.dataset.talkStatus = "1";
+    wrap.appendChild(statusEl);
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:6px;", "🔑 Configuração da API (Google Gemini):"));
+    wrap.appendChild(makeField("API Key", bot.talk.config.apiKey ? "***configured***" : "", (v) => { 
+      bot.talk.updateConfig({ apiKey: v.trim() }); 
+    }));
+
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:6px;", "Obtenha sua chave em: https://ai.google.dev"));
+
+    wrap.appendChild(makeField("Modelo", bot.talk.config.model || "gemini-flash-latest", (v) => { 
+      bot.talk.updateConfig({ model: v.trim() }); 
+    }));
+
+    wrap.appendChild(makeField("Poll (ms)", bot.talk.config.pollMs || 1000, (v) => { 
+      bot.talk.updateConfig({ pollMs: Math.max(1000, Number(v) || 1000) }); 
+    }, "number"));
+
+    wrap.appendChild(makeField("Cooldown resposta (ms)", bot.talk.config.replyCooldownMs || 1500, (v) => { 
+      bot.talk.updateConfig({ replyCooldownMs: Math.max(0, Number(v) || 1500) }); 
+    }, "number"));
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-top:8px; margin-bottom:4px;", "📝 Prompts Customizáveis:"));
+
+    const expandBtn = el("button", "width:100%; padding:5px; margin-bottom:6px; border:none; border-radius:4px; background:#333; color:#ccc; cursor:pointer; font-size:11px;", "▼ Mostrar prompts customizáveis");
+    const prompWrap = el("div", "display:none; background:#111; padding:6px; border-radius:4px; margin-bottom:6px;");
+    expandBtn.onclick = () => {
+      const isHidden = prompWrap.style.display === "none";
+      prompWrap.style.display = isHidden ? "block" : "none";
+      expandBtn.textContent = isHidden ? "▲ Ocultar prompts" : "▼ Mostrar prompts customizáveis";
+    };
+    wrap.appendChild(expandBtn);
+
+    prompWrap.appendChild(el("div", "color:#999; font-size:10px; margin-bottom:4px;", "System prompt:"));
+    prompWrap.appendChild(makeField("", bot.talk.config.systemPrompt || "", (v) => { 
+      bot.talk.updateConfig({ systemPrompt: v }); 
+    }));
+
+    prompWrap.appendChild(el("div", "color:#999; font-size:10px; margin-top:6px; margin-bottom:4px;", "Greeting prompt:"));
+    prompWrap.appendChild(makeField("", bot.talk.config.greetingPrompt || "", (v) => { 
+      bot.talk.updateConfig({ greetingPrompt: v }); 
+    }));
+
+    prompWrap.appendChild(el("div", "color:#999; font-size:10px; margin-top:6px; margin-bottom:4px;", "Question prompt:"));
+    prompWrap.appendChild(makeField("", bot.talk.config.questionPrompt || "", (v) => { 
+      bot.talk.updateConfig({ questionPrompt: v }); 
+    }));
+
+    prompWrap.appendChild(el("div", "color:#999; font-size:10px; margin-top:6px; margin-bottom:4px;", "Statement prompt:"));
+    prompWrap.appendChild(makeField("", bot.talk.config.statementPrompt || "", (v) => { 
+      bot.talk.updateConfig({ statementPrompt: v }); 
+    }));
+
+    wrap.appendChild(prompWrap);
+
+    const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshToggle() {
+      const running = bot.talk.status().running;
+      toggleBtn.textContent = running ? "Stop Talk" : "Start Talk";
+      toggleBtn.style.background = running ? "#a33" : "#2d7a2d";
+    }
+    toggleBtn.onclick = () => {
+      bot.talk.status().running ? bot.talk.stop() : bot.talk.start();
+      refreshToggle();
+    };
+    refreshToggle();
+    toggleBtn.dataset.refreshable = "1";
+    toggleBtn._refresh = refreshToggle;
+    wrap.appendChild(toggleBtn);
+
+    return wrap;
+  }
+
   // ===== ABA: MISC (funções diversas — zoom blocker, e mais quando você mandar) =====
   function buildMiscTab() {
     const wrap = el("div");
@@ -6694,7 +7472,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     invisible: buildInvisibleTab, magicshield: buildMagicShieldTab, follow: buildFollowTab,
     friendheal: buildFriendHealTab, lasttarget: buildLastTargetTab, profiles: buildProfilesTab,
     attack: buildAttackTab, uhplayer: buildUhPlayerTab, cave: buildCaveTab, gmpanic: buildGmPanicTab, drop: buildDropTab,
-    pz: buildPzTab, chat: buildChatTab, fire: buildFireTab, misc: buildMiscTab,
+    pz: buildPzTab, talk: buildTalkTab, chat: buildChatTab, fire: buildFireTab, misc: buildMiscTab,
   };
 
   function renderBody() {
@@ -6808,6 +7586,19 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
         uhplayerStatusEl.textContent = "● " + s.config.targetName + " — vida: " + (s.targetHpPercent != null ? s.targetHpPercent.toFixed(0) + "%" : "?") + (s.runeAvailable ? "" : " (sem runa de cura na bag)");
         uhplayerStatusEl.style.color = s.runeAvailable ? "#5c5" : "#e77";
       }
+    }
+
+    // ── Talk ──
+    const talkStatusEl = bodyEl.querySelector("[data-talk-status]");
+    if (talkStatusEl && bot.talk) {
+      const s = bot.talk.status();
+      const apiKey = s.config?.apiKey;
+      talkStatusEl.textContent = !apiKey
+        ? "⚠ Sem API Key configurada"
+        : s.running
+          ? "● Rodando (respondendo auto)"
+          : "○ Parado";
+      talkStatusEl.style.color = !apiKey ? "#e77" : s.running ? "#5c5" : "#999";
     }
 
     // ── Chat ──
@@ -6946,6 +7737,11 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
   if (FriendHeal.config.enabled) FriendHeal.start();
   if (LastTarget.config.enabled) LastTarget.start();
 
+  // Auto-start Talk se tiver API Key configurada
+  if (bot.talk && bot.talk.config.apiKey) {
+    bot.talk.start();
+  }
+
   window.allInOne = {
     Rune, Haste, Eat, Ring, Monk, Stones, Panic,
     Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget, Profiles,
@@ -6954,5 +7750,10 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     Chatdetector: bot.Chatdetector, HazardStepper, PzReturner,
     ZoomBlocker, SwipeNavBlocker, PerformanceMode, HideSpellAnimations,
   };
+  
   log("carregado. Painel com 23 abas criado no canto da tela.");
+  
+  // ✅ Expõe bot GLOBALMENTE para usar no console
+  window.bot = bot;
+  console.log("[✅] Bot exposto globalmente - use bot.talk");
 })();
