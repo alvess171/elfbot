@@ -5904,6 +5904,22 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     refreshList();
     wrap.appendChild(listEl2);
 
+    const updateBtn = el("button", "width:100%; padding:6px; margin-bottom:8px; border:none; border-radius:4px; cursor:pointer; background:#2c4fc7; color:#fff; font-weight:bold;", "💾 Salvar alterações no perfil ativo");
+    updateBtn.onclick = () => {
+      const activeName = Profiles.getActiveName();
+      if (!activeName) {
+        alert("Nenhum perfil ativo no momento. Carrega um perfil primeiro, ou usa 'Salvar como novo perfil' abaixo.");
+        return;
+      }
+      Profiles.save(activeName);
+      refreshList();
+      activeEl.textContent = "Ativo: " + (Profiles.getActiveName() || "nenhum");
+      log("perfil atualizado:", activeName);
+    };
+    wrap.appendChild(updateBtn);
+
+    wrap.appendChild(el("div", "border-top:1px solid #333; margin:4px 0 8px;"));
+
     const nameInput = el("input", "width:100%; margin-bottom:6px; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee; box-sizing:border-box;");
     nameInput.placeholder = "nome do novo perfil";
     wrap.appendChild(nameInput);
