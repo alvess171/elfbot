@@ -1153,6 +1153,54 @@
     return { start, stop, get running() { return state.running; }, get status() { return lastStatus; } };
   })();
 
+  // ===== MÓDULO: HIDE SPELL ANIMATIONS (esconde projétil/área visual de magias) =====
+  const HideSpellAnimations = (() => {
+    const KEY = "hideSpellAnimations.config";
+    const config = Object.assign({ enabled: false }, bot.storage.get(KEY, {}));
+    const state = { active: false, originalAddDistance: null, originalAddPosition: null };
+
+    function persist() { bot.storage.set(KEY, { ...config }); }
+
+    function start() {
+      if (state.active) return;
+      const renderer = window.gameClient?.renderer;
+      if (!renderer || typeof renderer.addDistanceAnimation !== "function" || typeof renderer.addPositionAnimation !== "function") {
+        log("hide spell animations: renderer não disponível ainda");
+        return;
+      }
+
+      state.originalAddDistance = renderer.addDistanceAnimation;
+      state.originalAddPosition = renderer.addPositionAnimation;
+
+      renderer.addDistanceAnimation = function () {}; // projétil (ex: bola de fogo voando)
+      renderer.addPositionAnimation = function () {}; // efeito de área (ex: explosão no tile)
+
+      state.active = true;
+      config.enabled = true;
+      persist();
+      log("hide spell animations ativado — projétil e área de magia não são mais desenhados");
+      updatePanel();
+    }
+
+    function stop() {
+      const renderer = window.gameClient?.renderer;
+      if (renderer && state.originalAddDistance) renderer.addDistanceAnimation = state.originalAddDistance;
+      if (renderer && state.originalAddPosition) renderer.addPositionAnimation = state.originalAddPosition;
+
+      state.active = false;
+      state.originalAddDistance = null;
+      state.originalAddPosition = null;
+      config.enabled = false;
+      persist();
+      log("hide spell animations desativado");
+      updatePanel();
+    }
+
+    if (config.enabled) start();
+
+    return { config, start, stop, get running() { return state.active; } };
+  })();
+
   // ===== MÓDULO: PERFORMANCE MODE (silencia logs + desativa animações CSS) =====
   const PerformanceMode = (() => {
     const KEY = "performanceMode.config";
@@ -1192,7 +1240,8 @@
       localStorage.setItem(STORAGE_PREFIX + "performanceMode.quiet", "true");
       persist();
       injectCss();
-      console.log("[allInOne] Performance Mode ativado (logs silenciados, animações desativadas)");
+      try { window.gameClient?.renderer?.setWeather?.(false); } catch (e) { log("setWeather failed", e?.message || e); }
+      console.log("[allInOne] Performance Mode ativado (logs silenciados, animações desativadas, weather desligado)");
       updatePanel();
     }
 
@@ -1203,6 +1252,7 @@
       localStorage.setItem(STORAGE_PREFIX + "performanceMode.quiet", "false");
       persist();
       removeCss();
+      try { window.gameClient?.renderer?.setWeather?.(true); } catch (e) { log("setWeather failed", e?.message || e); }
       console.log("[allInOne] Performance Mode desativado");
       updatePanel();
     }
@@ -6582,7 +6632,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     wrap.appendChild(el("div", "border-top:1px solid #333; margin:10px 0 6px;"));
 
     wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-bottom:4px;", "⚡ Modo Performance"));
-    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:6px;", "Silencia os logs do console e desativa animações/transições CSS da página — reduz consumo de CPU, principalmente com vários módulos ativos ao mesmo tempo."));
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:6px;", "Silencia os logs do console, desativa animações/transições CSS e desliga efeitos de clima (weather) — reduz consumo de CPU/GPU."));
 
     const perfToggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
     function refreshPerfToggle() {
@@ -6597,6 +6647,25 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     perfToggleBtn.dataset.refreshable = "1";
     perfToggleBtn._refresh = refreshPerfToggle;
     wrap.appendChild(perfToggleBtn);
+
+    wrap.appendChild(el("div", "border-top:1px solid #333; margin:10px 0 6px;"));
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-bottom:4px;", "🪄 Esconder animação de magia"));
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:6px;", "Esconde o projétil e a área visual de magias (suas e de monstros/jogadores) — a magia continua funcionando normalmente, só o efeito visual some."));
+
+    const spellAnimToggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshSpellAnimToggle() {
+      spellAnimToggleBtn.textContent = HideSpellAnimations.running ? "Mostrar animação de magia" : "Esconder animação de magia";
+      spellAnimToggleBtn.style.background = HideSpellAnimations.running ? "#a33" : "#2d7a2d";
+    }
+    spellAnimToggleBtn.onclick = () => {
+      HideSpellAnimations.running ? HideSpellAnimations.stop() : HideSpellAnimations.start();
+      refreshSpellAnimToggle();
+    };
+    refreshSpellAnimToggle();
+    spellAnimToggleBtn.dataset.refreshable = "1";
+    spellAnimToggleBtn._refresh = refreshSpellAnimToggle;
+    wrap.appendChild(spellAnimToggleBtn);
 
     // (espaço reservado pra próxima função que você mandar)
 
@@ -6859,7 +6928,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
     UhPlayer: bot.uhPlayer, AttackSpellCaster,
     Chatdetector: bot.Chatdetector, HazardStepper, PzReturner,
-    ZoomBlocker, SwipeNavBlocker, PerformanceMode,
+    ZoomBlocker, SwipeNavBlocker, PerformanceMode, HideSpellAnimations,
   };
   log("carregado. Painel com 23 abas criado no canto da tela.");
 })();
