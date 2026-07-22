@@ -120,7 +120,7 @@
   // com enabled:true salvo de sessões anteriores chamam updatePanel() assim
   // que são definidos — se essas variáveis só existissem mais abaixo no
   // arquivo, isso geraria "Cannot access before initialization".
-  let panelEl, bodyEl, tabsEl;
+  let panelEl, bodyEl, tabsEl, contentWrapEl;
 
   // ===== MÓDULO: RUNE MAKER =====
   const Rune = (() => {
@@ -6865,41 +6865,49 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
   function toggleMinimize(minimizeBtn) {
     minimized = !minimized;
-    tabsEl.style.display = minimized ? "none" : "flex";
-    bodyEl.style.display = minimized ? "none" : "block";
+    contentWrapEl.style.display = minimized ? "none" : "block";
     minimizeBtn.textContent = minimized ? "▢" : "—";
-    panelEl.style.width = minimized ? "auto" : "250px";
+    panelEl.style.width = minimized ? "auto" : "";
   }
 
   function buildPanel() {
     panelEl = el("div", `
       position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); z-index:999999;
-      background:#1e1e1e; color:#eee; font-family:sans-serif; font-size:12px;
+      background:#1e1e1e; color:#eee; font-family:sans-serif; font-size:13px;
       border:1px solid #444; border-radius:8px; padding:0;
-      width:250px; box-shadow:0 4px 12px rgba(0,0,0,0.5); user-select:none;
-      overflow:hidden; touch-action:none;
+      width:300px; max-width:94vw; max-height:88vh;
+      box-shadow:0 4px 12px rgba(0,0,0,0.5); user-select:none;
+      display:flex; flex-direction:column; touch-action:none;
     `);
 
-    const header = el("div", "display:flex; align-items:center; justify-content:space-between; padding:10px; cursor:move; background:#2a2a2a; border-bottom:1px solid #444; font-size:13px;");
+    const header = el("div", "display:flex; align-items:center; justify-content:space-between; padding:10px; cursor:move; background:#2a2a2a; border-bottom:1px solid #444; font-size:14px; border-radius:8px 8px 0 0; flex-shrink:0;");
     const titleEl = el("div", "font-weight:bold;", "All-In-One Bot");
-    const minimizeBtn = el("button", "background:#3a3a3a; color:#eee; border:none; border-radius:4px; width:22px; height:22px; cursor:pointer; font-size:13px; line-height:1; flex-shrink:0;", "—");
+    const minimizeBtn = el("button", "background:#3a3a3a; color:#eee; border:none; border-radius:4px; width:28px; height:28px; cursor:pointer; font-size:15px; line-height:1; flex-shrink:0;", "—");
     minimizeBtn.onclick = (e) => { e.stopPropagation(); toggleMinimize(minimizeBtn); };
     header.appendChild(titleEl);
     header.appendChild(minimizeBtn);
     panelEl.appendChild(header);
     makeDraggable(header);
 
-    tabsEl = el("div", "display:flex; flex-wrap:wrap; gap:2px; padding:6px; background:#181818; border-bottom:1px solid #444;");
+    // Tudo que fica abaixo do cabeçalho (abas + conteúdo) rola junto,
+    // como um bloco só — assim, mesmo se o conteúdo for mais alto que a
+    // tela (comum no celular em modo vertical), dá pra rolar até o
+    // botão Start/Stop no final, sem nada ficar inacessível.
+    contentWrapEl = el("div", "overflow-y:auto; flex:1; min-height:0; -webkit-overflow-scrolling:touch;");
+    panelEl.appendChild(contentWrapEl);
+
+    tabsEl = el("div", "display:flex; flex-wrap:wrap; gap:4px; padding:8px; background:#181818; border-bottom:1px solid #444;");
     tabs.forEach((t) => {
-      const tabBtn = el("div", "flex:1; text-align:center; padding:4px 2px; border-radius:4px; cursor:pointer; font-size:10px; background:#2a2a2a; color:#ccc; min-width:55px;", t.label);
+      const tabBtn = el("div", "flex:1 1 auto; text-align:center; padding:8px 6px; border-radius:5px; cursor:pointer; font-size:13px; background:#2a2a2a; color:#ccc; min-width:78px;");
+      tabBtn.textContent = t.label;
       tabBtn.dataset.tabId = t.id;
       tabBtn.onclick = () => switchTab(t.id);
       tabsEl.appendChild(tabBtn);
     });
-    panelEl.appendChild(tabsEl);
+    contentWrapEl.appendChild(tabsEl);
 
-    bodyEl = el("div", "padding:10px; max-height:60vh; overflow-y:auto;");
-    panelEl.appendChild(bodyEl);
+    bodyEl = el("div", "padding:12px;");
+    contentWrapEl.appendChild(bodyEl);
 
     document.body.appendChild(panelEl);
     switchTab("rune");
