@@ -5648,22 +5648,22 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
   // "acesso antes da inicialização" quando um módulo já vem com enabled:true
   // salvo e tenta chamar updatePanel() antes do painel existir de fato)
   const tabs = [
+    { id: "heal", label: "Heal" },
+    { id: "attack", label: "Attack" },
+    { id: "cave", label: "Cave" },
     { id: "rune", label: "Rune" },
+    { id: "ring", label: "Ring" },
     { id: "haste", label: "Haste" },
     { id: "eat", label: "Eat" },
-    { id: "ring", label: "Ring" },
     { id: "monk", label: "Monk" },
     { id: "stones", label: "Stones" },
     { id: "panic", label: "Panic" },
-    { id: "heal", label: "Heal" },
     { id: "invisible", label: "Invis" },
     { id: "magicshield", label: "MShield" },
     { id: "follow", label: "Follow" },
     { id: "friendheal", label: "FrHeal" },
     { id: "lasttarget", label: "LastTgt" },
-    { id: "attack", label: "Attack" },
     { id: "uhplayer", label: "UH Player" },
-    { id: "cave", label: "Cave" },
     { id: "gmpanic", label: "GM Panic" },
     { id: "drop", label: "Drop" },
     { id: "pz", label: "PZ" },
@@ -6873,16 +6873,16 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
   function buildPanel() {
     panelEl = el("div", `
       position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); z-index:999999;
-      background:#1e1e1e; color:#eee; font-family:sans-serif; font-size:13px;
+      background:#1e1e1e; color:#eee; font-family:sans-serif; font-size:12px;
       border:1px solid #444; border-radius:8px; padding:0;
-      width:300px; max-width:94vw; max-height:88vh;
+      width:260px; max-width:92vw; max-height:85vh;
       box-shadow:0 4px 12px rgba(0,0,0,0.5); user-select:none;
       display:flex; flex-direction:column; touch-action:none;
     `);
 
-    const header = el("div", "display:flex; align-items:center; justify-content:space-between; padding:10px; cursor:move; background:#2a2a2a; border-bottom:1px solid #444; font-size:14px; border-radius:8px 8px 0 0; flex-shrink:0;");
+    const header = el("div", "display:flex; align-items:center; justify-content:space-between; padding:10px; cursor:move; background:#2a2a2a; border-bottom:1px solid #444; font-size:13px; border-radius:8px 8px 0 0; flex-shrink:0;");
     const titleEl = el("div", "font-weight:bold;", "All-In-One Bot");
-    const minimizeBtn = el("button", "background:#3a3a3a; color:#eee; border:none; border-radius:4px; width:28px; height:28px; cursor:pointer; font-size:15px; line-height:1; flex-shrink:0;", "—");
+    const minimizeBtn = el("button", "background:#3a3a3a; color:#eee; border:none; border-radius:4px; width:22px; height:22px; cursor:pointer; font-size:13px; line-height:1; flex-shrink:0;", "—");
     minimizeBtn.onclick = (e) => { e.stopPropagation(); toggleMinimize(minimizeBtn); };
     header.appendChild(titleEl);
     header.appendChild(minimizeBtn);
@@ -6896,9 +6896,9 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     contentWrapEl = el("div", "overflow-y:auto; flex:1; min-height:0; -webkit-overflow-scrolling:touch;");
     panelEl.appendChild(contentWrapEl);
 
-    tabsEl = el("div", "display:flex; flex-wrap:wrap; gap:4px; padding:8px; background:#181818; border-bottom:1px solid #444;");
+    tabsEl = el("div", "display:flex; flex-wrap:wrap; gap:3px; padding:6px; background:#181818; border-bottom:1px solid #444;");
     tabs.forEach((t) => {
-      const tabBtn = el("div", "flex:1 1 auto; text-align:center; padding:8px 6px; border-radius:5px; cursor:pointer; font-size:13px; background:#2a2a2a; color:#ccc; min-width:78px;");
+      const tabBtn = el("div", "flex:1 1 auto; text-align:center; padding:5px 4px; border-radius:4px; cursor:pointer; font-size:11px; background:#2a2a2a; color:#ccc; min-width:62px;");
       tabBtn.textContent = t.label;
       tabBtn.dataset.tabId = t.id;
       tabBtn.onclick = () => switchTab(t.id);
@@ -6906,11 +6906,11 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     });
     contentWrapEl.appendChild(tabsEl);
 
-    bodyEl = el("div", "padding:12px;");
+    bodyEl = el("div", "padding:10px;");
     contentWrapEl.appendChild(bodyEl);
 
     document.body.appendChild(panelEl);
-    switchTab("rune");
+    switchTab("heal");
   }
 
   buildPanel();
